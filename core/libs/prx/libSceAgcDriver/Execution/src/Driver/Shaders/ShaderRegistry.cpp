@@ -94,20 +94,33 @@ struct ShaderPreparationTransaction::State {
     };
     static std::mutex writers;
     static thread_local State* active;
-    std::unique_lock<std::mutex> lock{writers};
+    std::unique_lock<std::mutex> lock{writers, std::defer_lock};
     std::map<PreparedShaders*, Change> changes;
     bool failed = false;
+
+    void Lock() {
+        if (!lock.owns_lock()) lock.lock();
+    }
 };
 
 std::mutex ShaderPreparationTransaction::State::writers;
 thread_local ShaderPreparationTransaction::State* ShaderPreparationTransaction::State::active = nullptr;
 
-ShaderPreparationTransaction::ShaderPreparationTransaction() {
+ShaderPreparationTransaction::ShaderPreparationTransaction() : ShaderPreparationTransaction(std::defer_lock) {
+    Lock();
+}
+
+ShaderPreparationTransaction::ShaderPreparationTransaction(std::defer_lock_t) {
     if (State::active == nullptr) {
         state = std::make_unique<State>();
         State::active = state.get();
     }
     root = State::active;
+}
+
+void ShaderPreparationTransaction::Lock() {
+    require(!committed, "shader preparation transaction is already committed");
+    root->Lock();
 }
 
 ShaderPreparationTransaction::~ShaderPreparationTransaction() {
@@ -116,7 +129,7 @@ ShaderPreparationTransaction::~ShaderPreparationTransaction() {
 }
 
 PreparedShaderState& ShaderPreparationTransaction::Edit(const ShaderSnapshot& snapshot) {
-    require(!committed, "shader preparation transaction is already committed");
+    Lock();
     auto& changes = root->changes;
     const auto found = changes.find(snapshot.prepared.get());
     if (found != changes.end()) return found->second.prepared;
@@ -126,12 +139,14 @@ PreparedShaderState& ShaderPreparationTransaction::Edit(const ShaderSnapshot& sn
 
 const PreparedShaderState& ShaderPreparationTransaction::Read(const ShaderSnapshot& snapshot) const {
     require(!committed, "shader preparation transaction is already committed");
+    root->Lock();
     const auto found = root->changes.find(snapshot.prepared.get());
     return found != root->changes.end() ? found->second.prepared : *snapshot.prepared;
 }
 
 void ShaderPreparationTransaction::Commit() {
     require(!committed && !root->failed, "shader preparation transaction was aborted");
+    Lock();
     if (state != nullptr) {
         std::vector<std::unique_lock<std::mutex>> locks;
         locks.reserve(state->changes.size());
@@ -685,7 +700,7 @@ void ResolvePreparedGraphics(const ShaderSnapshot& front, const std::shared_ptr<
 void Driver::RegisterShader(const Shader* shader) {
     PerformanceContext timingContext(FrameTiming::Preparation());
     PerformanceTimer timing("Shader.Register");
-    ShaderPreparationTransaction transaction;
+    ShaderPreparationTransaction transaction(std::defer_lock);
     CheckFailure();
     GuestMemory::CheckRange(shader, sizeof(Shader), 1);
     Shader fields;
@@ -702,6 +717,7 @@ void Driver::RegisterShader(const Shader* shader) {
     snapshot.header.resize(fields.header_size);
     std::memcpy(snapshot.header.data(), static_cast<const void*>(shader), fields.header_size);
 
+    bool alreadyRegistered = false;
     {
         std::lock_guard lock(mutex);
         rethrowFailure();
@@ -710,11 +726,14 @@ void Driver::RegisterShader(const Shader* shader) {
             if (found != shaders->end()) {
                 const auto& current = *found->second;
                 if (current.headerAddress == snapshot.headerAddress && current.type == snapshot.type && current.code == snapshot.code && current.header == snapshot.header) {
-                    transaction.Commit();
-                    return;
+                    alreadyRegistered = true;
                 }
             }
         }
+    }
+    if (alreadyRegistered) {
+        transaction.Commit();
+        return;
     }
 
     std::shared_ptr<VulkanDevice> localDevice = device.Load();
@@ -749,6 +768,7 @@ void Driver::RegisterShader(const Shader* shader) {
         print(fields.sh_registers, fields.num_sh_registers);
         std::fprintf(stderr, "\n");
     }
+    transaction.Lock();
     std::lock_guard lock(mutex);
     rethrowFailure();
     PublishRegisteredShader(shaders, std::make_shared<const ShaderSnapshot>(std::move(snapshot)));
