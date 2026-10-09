@@ -122,6 +122,7 @@ IrProgram PrepareResourceProgram(const RecompileRequest& request) {
     translateOptions.userDataCount = static_cast<std::uint32_t>(request.context.userData.size());
     translateOptions.scratchDwords = request.context.compute.has_value() ? request.context.compute->scratchDwords : 0u;
     translateOptions.fragmentShaderBarycentricEnabled = request.target.fragmentShaderBarycentricEnabled;
+    translateOptions.floatMode = request.context.floatMode;
     translateOptions.inputInfo = inputInfo;
 
     constexpr InstructionTranslator translator;
@@ -343,7 +344,7 @@ CompiledVariant compileVariant(const RecompileRequest& request, IrProgram progra
     result.variantId = nextVariantId();
     result.spirv = spirvEmitter.Emit(program, inputInfo, bindings, targetOptions);
 
-    result.bdaAbiVersion = program.Info().usesDma ? request.target.bdaAbiVersion : 0u;
+    result.bdaAbiVersion = program.Info().usesDma || program.Info().usesFaultBuffer ? request.target.bdaAbiVersion : 0u;
     result.memoryOffsetDword = bindings.layout.memoryOffsetDword;
     result.shaderDataDwords = bindings.layout.ShaderDataDwords();
     result.imageMetadataDword = bindings.layout.ImageMetadataDword();
@@ -679,6 +680,7 @@ RecompileResult materializeResult(const CompiledVariant& variant, const Recompil
     DescriptorBindingBuilder{}.Populate(bindings, variant.bindings, *bindingPlan, variant.info.userDataBase, snapshot, partialThreads(request));
     result.bindings = std::move(bindings.bindings);
     result.pushConstants = std::move(bindings.pushConstants);
+    result.poisonedSrtReads = static_cast<std::uint32_t>(snapshot.srtPoison.size());
     return result;
 }
 
