@@ -97,6 +97,7 @@ struct State {
     VkRect2D scissor;
     VkCullModeFlags cullMode;
     VkFrontFace frontFace;
+    VkProvokingVertexModeEXT provokingVertexMode = VK_PROVOKING_VERTEX_MODE_FIRST_VERTEX_EXT;
     VkPipelineColorBlendAttachmentState blend;
     std::array<float, 4> blendConstants;
 };
