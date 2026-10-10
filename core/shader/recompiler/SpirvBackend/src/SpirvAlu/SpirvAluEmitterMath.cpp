@@ -1229,7 +1229,7 @@ static bool NativeF16Rte(const SpirvEmitterState& state) {
     return supported(spv::CapabilityFloat16) && supported(spv::CapabilityRoundingModeRTE) && supported(spv::CapabilityDenormPreserve);
 }
 
-static std::uint32_t EmitNativeF32ToF16BitsRte(SpirvEmitterState& state, std::uint32_t value) {
+static void EmitNativeF16Modes(SpirvEmitterState& state) {
     state.module.EmitCapability(spv::CapabilityFloat16);
     state.module.EmitCapability(spv::CapabilityRoundingModeRTE);
     state.module.EmitCapability(spv::CapabilityDenormPreserve);
@@ -1239,6 +1239,10 @@ static std::uint32_t EmitNativeF32ToF16BitsRte(SpirvEmitterState& state, std::ui
         state.module.AddExecutionMode(state.mainFunc, spv::ExecutionModeSignedZeroInfNanPreserve, 16u);
         state.nativeF16ModesEmitted = true;
     }
+}
+
+static std::uint32_t EmitNativeF32ToF16BitsRte(SpirvEmitterState& state, std::uint32_t value) {
+    EmitNativeF16Modes(state);
     const auto u32 = TypeU32(state);
     const auto f16 = state.module.Type(spv::OpTypeFloat, 16u);
     const auto half = Unary(state, spv::OpFConvert, f16, value);
@@ -1252,6 +1256,24 @@ static std::uint32_t EmitNativeF32ToF16BitsRte(SpirvEmitterState& state, std::ui
     const auto nan = Binary(state, spv::OpBitwiseOr, u32, ConstantU32(state, 0x7e00u), payload);
     const auto result = Select(state, u32, Binary(state, spv::OpUGreaterThan, TypeBool(state), magnitude, ConstantU32(state, 0x7f800000u)), nan, Binary(state, spv::OpBitwiseAnd, u32, bits, ConstantU32(state, 0x7fffu)));
     return Binary(state, spv::OpBitwiseOr, u32, sign, result);
+}
+
+static std::uint32_t TypeF16x2(SpirvEmitterState& state) {
+    if (!NativeF16Rte(state)) FailEmit("packed f16 math needs Float16, RoundingModeRTE and DenormPreserve");
+    EmitNativeF16Modes(state);
+    return state.module.Type(spv::OpTypeVector, state.module.Type(spv::OpTypeFloat, 16u), 2u);
+}
+
+std::uint32_t EmitFPAdd16x2(SpirvEmitterState& state, std::uint32_t arg0, std::uint32_t arg1) {
+    const auto f16x2 = TypeF16x2(state);
+    const auto sum = Binary(state, spv::OpFAdd, f16x2, Unary(state, spv::OpBitcast, f16x2, arg0), Unary(state, spv::OpBitcast, f16x2, arg1));
+    return Unary(state, spv::OpBitcast, TypeU32(state), Exact(state, sum));
+}
+
+std::uint32_t EmitFPMul16x2(SpirvEmitterState& state, std::uint32_t arg0, std::uint32_t arg1) {
+    const auto f16x2 = TypeF16x2(state);
+    const auto product = Binary(state, spv::OpFMul, f16x2, Unary(state, spv::OpBitcast, f16x2, arg0), Unary(state, spv::OpBitcast, f16x2, arg1));
+    return Unary(state, spv::OpBitcast, TypeU32(state), Exact(state, product));
 }
 
 std::uint32_t EmitF32ToF16BitsRte(SpirvEmitterState& state, std::uint32_t value) {
