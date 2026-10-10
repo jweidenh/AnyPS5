@@ -141,6 +141,8 @@ enum class IrOpcode : std::uint16_t {
     CompositeExtractU32x4,
     PackHalf2x16,
     PackFloat2x16Rtz,
+    FPAdd16x2,
+    FPMul16x2,
     FPAbs32,
     FPNeg32,
     FPSaturate32,
