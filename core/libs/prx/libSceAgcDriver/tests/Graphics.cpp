@@ -2427,6 +2427,12 @@ void barycentricEmulationTests() {
     auto state = DecodeState(makeState());
     Require(state.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, "the reference state is not a triangle list");
     ValidateShaders(shaders, state, subgroup, false, false, false, true);
+    Context provoking{};
+    ValidateProvokingVertex(provoking, state, shaders);
+    provoking.provokingVertexLast = true;
+    auto last = state;
+    last.provokingVertexMode = VK_PROVOKING_VERTEX_MODE_LAST_VERTEX_EXT;
+    expectFailure([&] { ValidateProvokingVertex(provoking, last, shaders); }, "last provoking vertex is unsupported for generated primitive pipelines");
     state.topology = VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
     expectFailure([&] { ValidateShaders(shaders, state, subgroup, false, false, false, true); }, "triangle primitives");
     state.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;

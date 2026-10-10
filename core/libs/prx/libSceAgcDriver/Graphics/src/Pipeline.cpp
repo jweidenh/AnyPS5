@@ -89,7 +89,8 @@ void ValidateProvokingVertex(const Context& context, const State& state, std::sp
     Require(state.provokingVertexMode == VK_PROVOKING_VERTEX_MODE_FIRST_VERTEX_EXT || state.provokingVertexMode == VK_PROVOKING_VERTEX_MODE_LAST_VERTEX_EXT, "invalid provoking vertex mode");
     if (state.provokingVertexMode == VK_PROVOKING_VERTEX_MODE_FIRST_VERTEX_EXT) return;
     Require(context.provokingVertexLast, "last provoking vertex requires VK_EXT_provoking_vertex with provokingVertexLast enabled");
-    Require(!state.rectList && state.stages.path == ShaderPath::Vertex && !state.stages.mesh && !state.stages.tessellation, "last provoking vertex is unsupported for generated primitive pipelines");
+    const bool generatedGeometry = std::any_of(shaders.begin(), shaders.end(), [](const CompiledShader& shader) { return shader.stage == ShaderRecompiler::ShaderStage::Geometry; });
+    Require(!state.rectList && state.stages.path == ShaderPath::Vertex && !state.stages.mesh && !state.stages.tessellation && !generatedGeometry, "last provoking vertex is unsupported for generated primitive pipelines");
     Require(state.topology == VK_PRIMITIVE_TOPOLOGY_POINT_LIST || state.topology == VK_PRIMITIVE_TOPOLOGY_LINE_LIST || state.topology == VK_PRIMITIVE_TOPOLOGY_LINE_STRIP || state.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST || state.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP || state.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN, "last provoking vertex is unsupported for this primitive topology");
     for (const auto& shader : shaders) {
         if (shader.stage != ShaderRecompiler::ShaderStage::Fragment) continue;
