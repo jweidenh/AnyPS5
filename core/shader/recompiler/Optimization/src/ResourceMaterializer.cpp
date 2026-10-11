@@ -191,8 +191,8 @@ DecodedImage decodeImageDescriptor(const DescriptorValue& descriptor, const Imag
             if (((descriptorImageSwizzle(descriptor) >> (component * 3u)) & 7u) == 7u) throw std::runtime_error("selects a channel the converted image format does not have");
         }
     }
-    decoded.srgbDecode = !storage && (srgbDecodeFormats & SrgbDecodeBit(format)) != 0u;
-    if (decoded.srgbDecode && !base.srgbDecodeCompatible && !base.depthCompare) {
+    decoded.srgbDecode = !storage && !base.depthCompare && (srgbDecodeFormats & SrgbDecodeBit(format)) != 0u;
+    if (decoded.srgbDecode && !base.srgbDecodeCompatible) {
         throw std::runtime_error("samples or gathers an sRGB image the device cannot sample, which is not implemented");
     }
     if (storage || decoded.conversionFormat != IrBufferFormat::Invalid) {
