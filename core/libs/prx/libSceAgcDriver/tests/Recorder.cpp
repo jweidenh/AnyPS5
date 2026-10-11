@@ -1465,6 +1465,99 @@ void misalignedSnapshotTests(const Device& device, Recorder& recorder) {
     recorder.Activate();
 }
 
+class DescriptorUpdates {
+public:
+    struct Contents {
+        std::map<std::pair<std::uint32_t, std::uint32_t>, VkDescriptorBufferInfo> buffers;
+        std::map<std::pair<std::uint32_t, std::uint32_t>, VkDescriptorImageInfo> images;
+    };
+    explicit DescriptorUpdates(Context& context) : context(context), previous(context.functions),
+        update(context.Resolved(&DeviceFunctions::updateDescriptorSets, "vkUpdateDescriptorSets")) {
+        Require(active == nullptr, "nested descriptor update capture");
+        if (previous != nullptr) functions = *previous;
+        functions.updateDescriptorSets = captureUpdate;
+        context.functions = &functions;
+        active = this;
+    }
+    ~DescriptorUpdates() { context.functions = previous; active = nullptr; }
+    std::vector<Contents> calls;
+    std::uint32_t copies = 0;
+
+private:
+    static VKAPI_ATTR void VKAPI_CALL captureUpdate(VkDevice device, std::uint32_t count, const VkWriteDescriptorSet* writes, std::uint32_t copyCount, const VkCopyDescriptorSet* copies) {
+        Contents contents;
+        for (std::uint32_t i = 0; i < count; ++i) {
+            const auto& write = writes[i];
+            for (std::uint32_t element = 0; element < write.descriptorCount; ++element) {
+                const auto key = std::pair{write.dstBinding, write.dstArrayElement + element};
+                if (write.descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER) contents.buffers[key] = write.pBufferInfo[element];
+                else contents.images[key] = write.pImageInfo[element];
+            }
+        }
+        active->calls.push_back(std::move(contents));
+        active->copies += copyCount;
+        active->update(device, count, writes, copyCount, copies);
+    }
+    Context& context;
+    const DeviceFunctions* previous;
+    DeviceFunctions functions{};
+    PFN_vkUpdateDescriptorSets update;
+    static inline DescriptorUpdates* active = nullptr;
+};
+
+void drawDescriptorWriteTests(const Device& device, Recorder& recorder) {
+    auto context = device.GetContext();
+    DescriptorUpdates updates(context);
+    {
+        DescriptorCache cache(context);
+        context.descriptorCache = &cache;
+        Recorder snapshots(context);
+        snapshots.Activate();
+        ShaderRecompiler::RecompileResult program;
+        ShaderRecompiler::DescriptorBinding data{};
+        data.kind = ShaderRecompiler::DescriptorKind::StorageBuffer;
+        data.role = ShaderRecompiler::DescriptorRole::FlattenedSrt;
+        data.binding = 2;
+        data.count = 1;
+        data.guestDescriptor = {1, 2, 3, 4};
+        program.bindings.push_back(data);
+        data.binding = 7;
+        program.bindings.push_back(data);
+        ShaderRecompiler::DescriptorBinding sampler{};
+        sampler.kind = ShaderRecompiler::DescriptorKind::Sampler;
+        sampler.role = ShaderRecompiler::DescriptorRole::GuestSamplers;
+        sampler.binding = static_cast<std::uint32_t>(ShaderRecompiler::RuntimeAbi::Binding::Samplers);
+        sampler.count = 2;
+        sampler.guestDescriptor.resize(8);
+        sampler.samplerDepthCompare = {false, false};
+        program.bindings.push_back(sampler);
+        const CompiledShader shader{ShaderRecompiler::ShaderStage::Compute, &program, 0};
+        ShaderResources resources(context, shader);
+        Require(updates.calls.size() == 1, "building resources did not write one descriptor set");
+        const auto original = updates.calls.front();
+        Require(original.buffers.size() == 2 && original.images.size() == 2, "descriptor test lacks mixed bindings and an image array");
+        for (std::size_t allocation = 0; allocation < 2; ++allocation) {
+            const ShaderResources::MovedBuffer moved{allocation, 0, 16, {5, 6, 7, 8}};
+            const auto draw = resources.PrepareDrawBindings(snapshots, std::span(&moved, 1));
+            Require(draw != nullptr && draw->snapshots.size() == 1, "moved shader data did not create a draw snapshot");
+            Require(updates.calls.size() == allocation + 2 && updates.copies == 0, "draw descriptors copied GPU memory or needed multiple updates");
+            const auto& actual = updates.calls.back();
+            Require(actual.buffers.size() == original.buffers.size() && actual.images.size() == original.images.size(), "snapshot update omitted unchanged descriptors");
+            for (const auto& [key, before] : original.buffers) {
+                const auto after = actual.buffers.at(key);
+                const auto expected = key.first == (allocation == 0 ? 2u : 7u) ? draw->snapshots.front().buffer->Handle() : before.buffer;
+                Require(after.buffer == expected && after.offset == before.offset && after.range == before.range, "snapshot update replaced the wrong buffer or changed its range");
+            }
+            for (const auto& [key, before] : original.images) {
+                const auto after = actual.images.at(key);
+                Require(after.sampler == before.sampler && after.imageView == before.imageView && after.imageLayout == before.imageLayout, "snapshot update changed an image descriptor");
+            }
+        }
+        snapshots.Sync();
+    }
+    recorder.Activate();
+}
+
 void drawSnapshotReuseTests(const Device& device, Recorder& recorder) {
     const auto& context = device.GetContext();
     constexpr std::size_t bytes = 65536;
@@ -2294,7 +2387,7 @@ void importWatchTests(const Device& device) {
     }
     const auto probe = ProbeImportWriteProtection(context);
     Require(probe.failure == nullptr, std::string("(u) the import probe failed at ") + (probe.failure != nullptr ? probe.failure : "") + " (" + std::to_string(static_cast<int>(probe.result)) + ")");
-    std::cout << "import probe: " << probe.writtenAfterSubmit << " of " << probe.pages << " scratch pages written after a GPU read, " << probe.writtenAtImport << " after the import\n";
+    std::cout << "import probe: " << probe.writtenAfterSubmit << " of " << probe.pages << " scratch pages written after a GPU read, " << probe.writtenAfterFill << " after a GPU write, " << probe.writtenAtImport << " after the import\n";
     Require(probe.writtenByCpu != 0, "(u) a CPU store after the import probe's GPU read was not collected");
     if (context.dmaBufImport) {
         const auto dmaBuf = ProbeDmaBufImportWriteProtection(context);
@@ -2454,11 +2547,12 @@ void staleGenerationTests(const Device& device, Recorder& recorder) {
     resource.dstSelW = 7;
     resource.dccAddress = address + surfaceBytes;
     {
+        Require(AgcDriver::GuestMemory::Watched(address, bytes), "(s) the block is not watched before the storage image takes its generation");
         auto image = std::make_shared<StorageTexture>(context, detiler, resource, 0);
-        Require(AgcDriver::GuestMemory::Watched(address, bytes), "(s) the storage image imported its memory before a generation was taken");
         const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
         const auto commands = recorder.Commands();
         recorder.Keep(image);
+        Require(image->Generation() != 0, "(s) the storage image took no generation while its memory was watched");
         const VkClearColorValue red{{1.0f, 0.0f, 0.0f, 1.0f}};
         RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
         context.Function<PFN_vkCmdClearColorImage>("vkCmdClearColorImage")(commands, image->Image(), VK_IMAGE_LAYOUT_GENERAL, &red, 1, &range);
@@ -2480,6 +2574,11 @@ void staleGenerationTests(const Device& device, Recorder& recorder) {
         copy.imageExtent = {side, side, 1};
         context.Function<PFN_vkCmdCopyImageToBuffer>("vkCmdCopyImageToBuffer")(copyCommands, image->Image(), VK_IMAGE_LAYOUT_GENERAL, readback.Handle(), 1, &copy);
         RecordMemoryBarrier(context, copyCommands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT);
+        recorder.Submit();
+        device.WaitQueue();
+        recorder.Sync();
+        Require(StorageTexture::FindPending(address, surfaceBytes) == image, "(s) the image is not pending after the refresh");
+        Require(StorageTexture::FlushPending(address, surfaceBytes, nullptr, "stale generation test"), "(s) the pending image was not flushed");
         recorder.Submit();
         device.WaitQueue();
         recorder.Sync();
@@ -3221,8 +3320,10 @@ void importWindowTests(const Device& device, Recorder& recorder) {
     resource.dstSelW = 7;
     resource.dccAddress = address + surfaceBytes;
     {
+        Require(!HostImportCovers(base, address, bytes), "(w) the block is imported before the cache takes its generation");
+        const auto cached = CollectWritesUncached(address, surfaceBytes);
+        Require(cached != 0 && UnchangedSince(address, surfaceBytes, cached), "(w) the cache's generation is not current before the import");
         auto image = std::make_shared<StorageTexture>(context, detiler, resource, 0);
-        Require(!HostImportCovers(base, address, bytes), "(w) the storage image imported its memory before a generation was taken");
         const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
         const auto commands = recorder.Commands();
         recorder.Keep(image);
@@ -3231,8 +3332,6 @@ void importWindowTests(const Device& device, Recorder& recorder) {
         context.Function<PFN_vkCmdClearColorImage>("vkCmdClearColorImage")(commands, image->Image(), VK_IMAGE_LAYOUT_GENERAL, &red, 1, &range);
         RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT);
         image->MarkDirty();
-        const auto cached = CollectWritesUncached(address, surfaceBytes);
-        Require(cached != 0 && UnchangedSince(address, surfaceBytes, cached), "(w) the cache's generation is not current before the import");
         const auto* import = HostImportFor(base, address, bytes);
         if (import == nullptr) {
             std::cout << "host import of the import window block refused: the import window not tested\n";
@@ -3243,6 +3342,7 @@ void importWindowTests(const Device& device, Recorder& recorder) {
         CollectWritesUncached(address, surfaceBytes);
         if (importWrites) {
             Require(!UnchangedSince(address, surfaceBytes, cached), "(w) a cache over the pages the import reported sees no change");
+            Require(image->Generation() != 0 && !UnchangedSince(address, surfaceBytes, image->Generation()), "(w) the storage image took its generation after the import window");
             std::array<std::uint8_t, surfaceBytes / 65536> changed{};
             const std::array<std::uint64_t, surfaceBytes / 65536> generations{cached, cached, cached, cached};
             Require(ChangedBlocks(address, surfaceBytes, generations, changed) && std::all_of(changed.begin(), changed.end(), [](std::uint8_t value) { return value == BlockMaybeWritten; }), "(w) the pages the import reported read as written by the CPU");
@@ -3695,6 +3795,82 @@ void sampleDumpTests(const Device& device, Recorder& recorder) {
     }
     CoverPass cover(context);
     inPassSampleDumpTests(recorder, context, cover, words, address, target);
+}
+
+void cmaskPassTests(const Device& device, Recorder& recorder) {
+    namespace GuestMemory = AgcDriver::GuestMemory;
+    auto context = device.GetContext();
+    context.hostImportAlignment = 0;
+    TextureDetiler detiler(context);
+    context.detiler = &detiler;
+    constexpr std::size_t surfaceBytes = 256 * 256 * 4;
+    constexpr std::size_t bytes = surfaceBytes + 65536;
+#ifdef _WIN32
+    void* block = VirtualAlloc(nullptr, bytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+#else
+    void* block = std::aligned_alloc(65536, bytes);
+#endif
+    Require(block != nullptr, "cannot allocate the CMASK pass block");
+    const auto address = reinterpret_cast<std::uint64_t>(block);
+    {
+        GuestAllocations::Mutation mutation;
+        mutation.Add(block, bytes, true, true, true);
+    }
+    struct Release {
+        const Context& context;
+        void* block;
+        ~Release() {
+            ClearCachedTextures(context.device);
+            {
+                GuestAllocations::Mutation mutation;
+                mutation.Remove(block);
+            }
+#ifdef _WIN32
+            VirtualFree(block, 0, MEM_RELEASE);
+#else
+            std::free(block);
+#endif
+        }
+    } release{context, block};
+    Require(HostImportFor(context, address, bytes) == nullptr, "CMASK copy-path test imported its memory");
+    std::memset(block, 0x55, surfaceBytes);
+    std::memset(static_cast<std::byte*>(block) + surfaceBytes, 0, 4096);
+    ColorTarget color{};
+    color.address = address;
+    color.extent = {256, 256};
+    color.format = VK_FORMAT_R8G8B8A8_UNORM;
+    color.bytes = surfaceBytes;
+    color.componentMapping = 0xe4u;
+    color.tileMode = ColorTileMode::RenderTarget;
+    color.cmaskAddress = address + surfaceBytes;
+    color.cmaskBytes = CmaskBytes(color.extent.width, color.extent.height);
+    color.clearWords = {0x80402010u, 0};
+    const auto run = [&] { RunColorMetadataPass(context, {ColorMetadataPass::Mode::EliminateFastClear, {color}}); };
+    auto broken = context;
+    broken.deviceProc = nullptr;
+    bool refused = false;
+    try {
+        RunColorMetadataPass(broken, {ColorMetadataPass::Mode::EliminateFastClear, {color}});
+    } catch (const std::runtime_error& error) {
+        refused = std::string_view(error.what()).find("missing Vulkan device function resolver") != std::string_view::npos;
+        if (!refused) throw;
+    }
+    Require(refused, "CMASK storage creation failure was silently ignored");
+    Require(*static_cast<std::uint8_t*>(block) == 0x55 && ReadDccKeys(color.cmaskAddress, color.cmaskBytes * 256u) == DccKeys::Clear0000, "failed CMASK storage creation changed guest memory");
+    run();
+    Require(StorageTexture::FindPending(address, surfaceBytes) != nullptr && *static_cast<std::uint8_t*>(block) == 0x55, "CMASK clear without host imports did not stay on the GPU");
+    Require(ReadDccKeys(color.cmaskAddress, color.cmaskBytes * 256u) == DccKeys::Uncompressed, "resident CMASK clear left unresolved metadata");
+    color.clearWords[0] = 0x12345678;
+    run();
+    std::vector<std::uint32_t> stored(surfaceBytes / 4);
+    GuestMemory::Read(address, std::as_writable_bytes(std::span(stored)));
+    Require(std::ranges::all_of(stored, [](auto word) { return word == 0x80402010u; }), "expanded CMASK changed a pending clear or copy write-back lost it");
+    const std::vector<std::byte> clearKeys(4096);
+    GuestMemory::Write(color.cmaskAddress, clearKeys);
+    run();
+    GuestMemory::Read(address, std::as_writable_bytes(std::span(stored)));
+    Require(std::ranges::all_of(stored, [](auto word) { return word == 0x12345678u; }), "a second resident CMASK clear retained the first frame");
+    recorder.Sync();
 }
 
 void metadataPassTests(const Device& device, Recorder& recorder) {
@@ -4415,6 +4591,33 @@ void pipelineCacheTests(const Device& device, bool benchmark) {
     std::cout << "Pipeline cache key and retained lifetime tests passed\n";
 }
 
+void descriptorPoolTests(const Device& device) {
+    DescriptorCache cache(device.GetContext());
+    const VkDescriptorSetLayoutBinding binding{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 32, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+    const std::array<std::uint32_t, 4> key{binding.binding, binding.descriptorType, binding.descriptorCount, binding.stageFlags};
+    const auto layout = cache.Layout(key, std::span(&binding, 1));
+    const VkDescriptorPoolSize size{binding.descriptorType, binding.descriptorCount};
+    const auto held = cache.Allocate(layout, std::span(&size, 1));
+    std::uint64_t initialPools = 0;
+    for (unsigned round = 0; round < 3; ++round) {
+        std::vector<DescriptorCache::SetAllocation> sets;
+        for (unsigned i = 0; i < 1100; ++i) {
+            const auto allocation = cache.Allocate(layout, std::span(&size, 1));
+            Require(allocation.set != VK_NULL_HANDLE, "descriptor pool rollover refused a valid layout");
+            sets.push_back(allocation);
+        }
+        const auto pools = cache.Counters().pools;
+        if (round == 0) {
+            initialPools = pools;
+        } else {
+            Require(pools <= initialPools + 1, "descriptor pool recycling grows behind one retained set");
+        }
+        for (const auto& allocation : sets) cache.Free(allocation);
+    }
+    cache.Free(held);
+    std::cout << "Descriptor pool recycling passed across 3,301 sets (" << initialPools << " initial pools, " << cache.Counters().pools << " final pools)\n";
+}
+
 void keysFillTests(const Device& device, Recorder& recorder) {
     const auto& base = device.GetContext();
     if (base.hostImportAlignment == 0) {
@@ -4715,6 +4918,10 @@ int main(int argc, char** argv) {
             return 0;
         }
 
+        if (argc == 2 && std::string_view(argv[1]) == "--descriptor-pool-only") {
+            descriptorPoolTests(device);
+            return 0;
+        }
         std::unique_lock gpu(GpuMutex());
         std::cout << "host imports " << (PrepareImportWatch(device.GetContext()) == ImportWatch::Unwatch ? "are compared" : "stay watched") << '\n';
         Recorder recorder(device.GetContext());
@@ -4755,6 +4962,17 @@ int main(int argc, char** argv) {
             unitShadowTests(device, recorder);
             return 0;
         }
+        if (argc == 2 && std::string_view(argv[1]) == "--cmask-only") {
+            cmaskPassTests(device, recorder);
+            std::cout << "CMASK copied clear, write-back and failure tests passed\n";
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "--draw-descriptors-only") {
+            drawDescriptorWriteTests(device, recorder);
+            std::cout << "Draw descriptor writes and snapshot overrides passed\n";
+            return 0;
+        }
+
         readTrackingTests(device, recorder);
         writeSettledTests(device, recorder);
         completionCountTests(device, recorder);
@@ -4775,6 +4993,7 @@ int main(int argc, char** argv) {
         misalignedSnapshotTests(device, recorder);
         misalignedRegionTests(device, recorder);
         drawSnapshotReuseTests(device, recorder);
+        drawDescriptorWriteTests(device, recorder);
         drawSnapshotEvictionTests(device);
         drawInputReuseTests(device, recorder);
         drawInputInPlaceTests(device, recorder);
@@ -4806,6 +5025,7 @@ int main(int argc, char** argv) {
         singleCubeTests(device, recorder);
         atomicViewTests(device, recorder);
         metadataPassTests(device, recorder);
+        cmaskPassTests(device, recorder);
         pendingKeyStoreTests(device, recorder);
         sampleDumpTests(device, recorder);
         gpu.unlock();

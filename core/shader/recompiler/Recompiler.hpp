@@ -140,6 +140,7 @@ struct ShaderPixelStageInfo {
     std::array<std::uint8_t, 8> targetExportMapping;
     std::array<ColorExportPacking, 8> targetExportPacking;
     bool dualSourceBlend;
+    bool alphaToCoverage;
 };
 
 struct ShaderVertexBufferResource {
@@ -226,6 +227,7 @@ struct SpirvTarget {
     std::uint32_t srgbDecodeFormats = 0;
     bool narrowSubgroupClock = false;
     bool fixedPushSlots = false;
+    bool float64DenormPreserve = false;
 };
 
 struct BindingLayout {
@@ -364,7 +366,9 @@ struct DescriptorBinding {
     // (a producer that does not fill it) must be treated as written.
     std::vector<bool> bufferWritten;
     std::vector<bool> samplerUnnormalized;
+    std::vector<bool> samplerIntegerBorder;
     std::vector<bool> imageUnnormalized;
+    std::vector<bool> imageUnnormalizedBaseLevel;
     std::vector<std::uint32_t> imageSamplers;
     std::vector<bool> bufferRead;
 };

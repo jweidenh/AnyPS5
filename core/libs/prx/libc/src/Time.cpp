@@ -1,5 +1,6 @@
 #include <cstdint>
 #include <cstddef>
+#include <cerrno>
 #include <ctime>
 #include <cstring>
 #include <limits>
@@ -10,6 +11,7 @@
 
 #include "prx/libc/include/General.hpp"
 #include "prx/libc/include/GuestTime.hpp"
+#include "prx/libc/include/SonyCrt.hpp"
 
 namespace {
 
@@ -213,6 +215,14 @@ char* APS5_VABI asctime_nid_postfix(const GuestTm* timeptr) {
     return std::asctime(&host);
 }
 
+char* APS5_VABI ctime_nid_postfix(const int64_t* timer) {
+    if (const GuestTm* local = localtime_nid_postfix(timer)) return asctime_nid_postfix(local);
+    static char unknown[26];
+    std::memcpy(unknown, "??? ??? ?? ??:??:?? ????\n", sizeof(unknown));
+    errno = EINVAL;
+    return unknown;
+}
+
 size_t APS5_VABI strftime_nid_postfix(char* str, size_t count, const char* format, const GuestTm* timeptr) {
     return libc_strftime_nid_postfix(str, count, format, timeptr);
 }
@@ -227,6 +237,14 @@ int64_t APS5_VABI clock_nid_postfix() {
 #else
     return static_cast<int64_t>(static_cast<double>(std::clock()) * 1000000.0 / CLOCKS_PER_SEC);
 #endif
+}
+
+int APS5_VABI ctime_s_nid_postfix(char* buffer, std::size_t size, const std::int64_t* time) {
+    return SonyCtimeS(buffer, size, time);
+}
+
+int APS5_VABI asctime_s_nid_postfix(char* buffer, std::size_t size, const GuestTm* time) {
+    return SonyAsctimeS(buffer, size, time);
 }
 
 }
