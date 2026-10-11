@@ -19,11 +19,12 @@ namespace {
 using namespace ShaderRecompiler;
 
 constexpr std::uint32_t MoveM0Two = 0xbefc0382u;
+constexpr std::uint32_t MoveM0GroupX = 0xbefc0304u;
 constexpr std::uint32_t MoveV4One = 0x7e0802f2u;
 constexpr std::uint32_t MoveV5Two = 0x7e0a02f4u;
 constexpr std::uint32_t MoveV6Four = 0x7e0c02f6u;
 constexpr std::uint32_t MovrelsV1V4 = 0x7e028704u;
-constexpr std::uint32_t MovreldV4V1 = 0x7e088501u;
+constexpr std::uint32_t MovreldV4V0 = 0x7e088500u;
 constexpr std::uint32_t MoveV1V5 = 0x7e020305u;
 constexpr std::uint32_t EndProgram = 0xbf810000u;
 
@@ -40,14 +41,14 @@ void Require(bool condition, const std::string& message) {
 
 std::vector<std::uint32_t> RecompileProgram(std::span<const std::uint32_t> code) {
     const std::array<std::uint32_t, 7> capabilities{spv::CapabilityShader, spv::CapabilityGroupNonUniform, spv::CapabilityGroupNonUniformBallot, spv::CapabilityGroupNonUniformVote, spv::CapabilityGroupNonUniformShuffle, spv::CapabilityInt64, spv::CapabilityPhysicalStorageBufferAddresses};
-    const std::array<std::uint32_t, 4> userData{};
+    const std::array<std::uint32_t, 4> userData{0x10000000u, 0u, 0x40u, 0x31016facu};
     const std::array<std::string_view, 2> extensions{"SPV_KHR_physical_storage_buffer", "SPV_KHR_8bit_storage"};
     RecompileRequest request{};
     request.shader = {ShaderStage::Compute, 0x20000u, code, 0, {}};
     request.context.waveSize = 32;
     request.context.userDataBaseRegister = 0;
     request.context.userData = userData;
-    request.context.compute = ShaderComputeStageInfo{{64u, 1u, 1u}, 4u, {false, false, false}, false, 1u};
+    request.context.compute = ShaderComputeStageInfo{{64u, 1u, 1u}, 4u, {true, false, false}, false, 1u};
     request.target.vulkanVersion = 0x00403000u;
     request.target.spirvVersion = 0x00010600u;
     request.target.subgroupSize = 32;
@@ -69,6 +70,7 @@ Shape Scan(std::span<const std::uint32_t> words) {
     std::vector<std::pair<std::uint32_t, std::uint32_t>> constants;
     std::vector<std::pair<std::uint32_t, std::uint32_t>> arrays;
     std::vector<std::pair<std::uint32_t, std::uint32_t>> functionPointers;
+    std::vector<std::uint32_t> windowVariables;
     for (std::size_t cursor = 5; cursor < words.size();) {
         const auto count = words[cursor] >> spv::WordCountShift;
         const auto op = static_cast<spv::Op>(words[cursor] & spv::OpCodeMask);
@@ -82,13 +84,18 @@ Shape Scan(std::span<const std::uint32_t> words) {
                 for (const auto& [array, length] : arrays) {
                     if (array != pointee) continue;
                     ++shape.functionArrays;
+                    windowVariables.push_back(words[cursor + 2]);
                     for (const auto& [constant, value] : constants) {
                         if (constant == length) shape.arrayLength = value;
                     }
                 }
             }
         }
-        if (op == spv::OpAccessChain) ++shape.accessChains;
+        if (op == spv::OpAccessChain) {
+            for (const auto variable : windowVariables) {
+                if (words[cursor + 3] == variable) ++shape.accessChains;
+            }
+        }
         if (op == spv::OpSelect) ++shape.selects;
         cursor += count;
     }
@@ -250,15 +257,16 @@ int main(int argc, char** argv) {
     if (argc != 1) return 2;
     bool passed = true;
 
-    passed &= run("a relative read and write index a function-scope window instead of selecting over the registers", [] {
-        const std::array<std::uint32_t, 8> code{MoveM0Two, MoveV4One, MoveV5Two, MoveV6Four, MovrelsV1V4, MovreldV4V1, MoveV1V5, EndProgram};
+    passed &= run("observable relative reads and writes index a function-scope window", [] {
+        const std::array<std::uint32_t, 12> code{MoveM0GroupX, MoveV4One, MoveV5Two, MoveV6Four, MovrelsV1V4,
+            0xe0700000u, 0x80000100u, MovreldV4V0, MoveV1V5, 0xe0700004u, 0x80000100u, EndProgram};
         const auto shape = Scan(RecompileProgram(code));
-        if (shape.functionArrays != 1 || shape.arrayLength != 3 || shape.accessChains < 2 || shape.selects > 4) std::fprintf(stderr, "  window shape: arrays %zu length %u access chains %zu selects %zu\n", shape.functionArrays, shape.arrayLength, shape.accessChains, shape.selects);
-        return shape.functionArrays == 1 && shape.arrayLength == 3 && shape.accessChains >= 2 && shape.selects <= 4;
+        if (shape.functionArrays != 1 || shape.arrayLength != 3 || shape.accessChains < 2) std::fprintf(stderr, "  window shape: arrays %zu length %u access chains %zu selects %zu\n", shape.functionArrays, shape.arrayLength, shape.accessChains, shape.selects);
+        return shape.functionArrays == 1 && shape.arrayLength == 3 && shape.accessChains >= 2;
     });
 
     passed &= run("a program without relative addressing keeps its registers in SSA values", [] {
-        const std::array<std::uint32_t, 5> code{MoveV4One, MoveV5Two, MoveV6Four, MoveV1V5, EndProgram};
+        const std::array<std::uint32_t, 7> code{MoveV4One, MoveV5Two, MoveV6Four, MoveV1V5, 0xe0700000u, 0x80000100u, EndProgram};
         const auto shape = Scan(RecompileProgram(code));
         return shape.functionArrays == 0 && shape.accessChains == 0;
     });

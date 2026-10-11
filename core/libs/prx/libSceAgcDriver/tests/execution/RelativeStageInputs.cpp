@@ -13,7 +13,7 @@ namespace {
 using AgcDriver::Graphics::Require;
 using ShaderRecompiler::ShaderStage;
 
-constexpr std::uint32_t Extent = 16u;
+constexpr std::uint32_t Extent = 64u;
 alignas(256) std::array<std::byte, Extent * Extent * 4u> pixels{};
 alignas(256) std::array<std::uint32_t, 16> output{};
 alignas(256) constexpr std::array<std::array<float, 4>, 6> positions{{
@@ -41,7 +41,7 @@ constexpr std::array<std::uint32_t, 9> computeCode{
 
 std::array<std::uint32_t, 4> BufferDescriptor(const void* data, std::uint32_t stride, std::uint32_t count) {
     const auto address = reinterpret_cast<std::uintptr_t>(data);
-    return {static_cast<std::uint32_t>(address), static_cast<std::uint32_t>((address >> 32u) & 0xffffu) | (stride << 16u), count, 0x01016facu};
+    return {static_cast<std::uint32_t>(address), static_cast<std::uint32_t>((address >> 32u) & 0xffffu) | (stride << 16u), count, stride == 0u ? 0x31016facu : 0x01016facu};
 }
 
 void Draw(AgcDriver::VulkanDevice& device, bool relativeVertex) {
@@ -112,7 +112,8 @@ void Dispatch(AgcDriver::VulkanDevice& device) {
     device.Dispatch(result, 1u, 1u, 1u);
     device.WaitIdle();
     for (std::size_t index = 0; index < output.size(); ++index) {
-        Require(output[index] == index / 8u, "relative stage input dispatch did not preserve the implicit Z input at output " + std::to_string(index));
+        Require(output[index] == index / 8u, "relative stage input dispatch did not preserve the implicit Z input at output " + std::to_string(index)
+            + ": got " + std::to_string(output[index]) + ", expected " + std::to_string(index / 8u));
     }
 }
 
