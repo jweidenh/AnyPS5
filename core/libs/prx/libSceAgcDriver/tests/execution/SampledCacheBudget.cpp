@@ -241,6 +241,7 @@ bool resourceCacheTests(Context context, const std::string& mode) {
     context.textureCache = &textures;
     Block block(context);
     if (context.hostImportAlignment == 0 || HostImportFor(context, block.Surface(0), BlockBytes) == nullptr) {
+        Require(std::getenv("ANYPS5_REQUIRE_VULKAN") == nullptr, "resource cache tests require host imports");
         std::puts("skipped, resource cache tests require host imports");
         return false;
     }
@@ -268,30 +269,51 @@ bool resourceCacheTests(Context context, const std::string& mode) {
             for (const bool sampledImages : {false, true}) {
                 const std::weak_ptr<StorageTexture> early = CachedStorageSurface(context, Resource(block.Surface(0)));
                 auto oversized = ImageResources(context, block, 0, static_cast<std::uint32_t>(Surfaces), sampledImages);
-                const auto image = early.lock();
+                const std::weak_ptr<ShaderResources> rejected = oversized;
+                auto image = early.lock();
+                Require(oversized->Reusable(), "the oversized descriptor set is not eligible for resource caching");
                 Require(image != nullptr && !image->Cached(), "the oversized descriptor set did not evict an early image while building");
-                cache.Insert({1}, oversized);
-                Require(cache.Size() == 0, sampledImages ? "an oversized sampled descriptor set entered the resource cache" : "an oversized storage descriptor set entered the resource cache");
+                if (sampledImages) Require(oversized->SampledTextures().size() == Surfaces && oversized->SampledTextures().front()->StorageSource() == image.get(), "the oversized sampled descriptor set does not retain the early storage image");
+                std::vector<std::shared_ptr<ShaderResources>> displaced;
+                cache.Insert({1}, oversized, &displaced);
+                Require(cache.Size() == 0 && displaced.empty(), sampledImages ? "an oversized sampled descriptor set entered the resource cache" : "an oversized storage descriptor set entered the resource cache");
+                image.reset();
                 oversized.reset();
+                TextureCacheUsage();
+                Require(rejected.expired() && early.expired(), "the rejected oversized descriptor set retained an evicted storage image");
+                std::puts(sampledImages ? "resource cache oversized sampled lifetime passed" : "resource cache oversized storage lifetime passed");
                 ClearCachedTextures(context.device);
             }
         } else {
             auto storage = ImageResources(context, block, 0, 1, false);
             auto sampled = ImageResources(context, block, 0, 1, true);
+            Require(storage->Reusable() && sampled->Reusable(), "the stale descriptor sets are not eligible for resource caching");
             Require(sampled->SampledTextures().front()->ViewsStorageImage(), "the sampled resource is not a storage-image view");
-            const auto image = StorageTexture::FindLive(block.Surface(0), SurfaceBytes);
+            auto image = StorageTexture::FindLive(block.Surface(0), SurfaceBytes);
+            const std::weak_ptr<StorageTexture> staleImage = image;
+            const std::weak_ptr<ShaderResources> storageSet = storage;
+            const std::weak_ptr<ShaderResources> sampledSet = sampled;
             Require(image != nullptr && image->Cached(), "the resource has no cached storage image");
             for (std::size_t surface = 1; surface < Surfaces && image->Cached(); ++surface) CachedStorageSurface(context, Resource(block.Surface(surface)));
             Require(!image->Cached(), "the test never evicted the oldest storage image");
             auto live = ImageResources(context, block, Surfaces - 1, 1, false);
             cache.Insert({1}, live);
             Require(cache.Find({1}) == live, "the resource cache rejected a live descriptor set");
+            std::vector<std::shared_ptr<ShaderResources>> displaced;
             for (const auto& stale : {storage, sampled}) {
-                cache.Insert({2}, stale);
-                Require(cache.Find({2}) == nullptr && cache.Size() == 1, "an uncached image was admitted to the resource cache");
-                cache.Insert({1}, stale);
-                Require(cache.Find({1}) == live && cache.Size() == 1, "an uncached image replaced a live resource-cache entry");
+                cache.Insert({2}, stale, &displaced);
+                Require(cache.Find({2}) == nullptr && cache.Size() == 1 && displaced.empty(), "an uncached image was admitted to the resource cache");
+                cache.Insert({1}, stale, &displaced);
+                Require(cache.Find({1}) == live && cache.Size() == 1 && displaced.empty(), "an uncached image replaced a live resource-cache entry");
             }
+            image.reset();
+            storage.reset();
+            Require(storageSet.expired() && !sampledSet.expired() && !staleImage.expired(), "stale storage release did not preserve the sampled caller's image");
+            std::puts("resource cache stale storage caller release passed");
+            sampled.reset();
+            TextureCacheUsage();
+            Require(sampledSet.expired() && staleImage.expired(), "the rejected descriptor sets retained an evicted storage image");
+            std::puts("resource cache stale sampled caller release passed");
         }
     } catch (...) {
         cache.Clear();
