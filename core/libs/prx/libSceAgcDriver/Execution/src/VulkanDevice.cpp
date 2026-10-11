@@ -73,6 +73,24 @@ void require(bool condition, const char* reason) {
     if (!condition) throw std::runtime_error(std::string("Vulkan presentation: ") + reason);
 }
 
+bool CoreVulkanCapability(std::uint32_t capability) {
+    switch (capability) {
+        case spv::CapabilityMatrix:
+        case spv::CapabilityShader:
+        case spv::CapabilityInputAttachment:
+        case spv::CapabilitySampled1D:
+        case spv::CapabilityImage1D:
+        case spv::CapabilitySampledBuffer:
+        case spv::CapabilityImageBuffer:
+        case spv::CapabilityImageQuery:
+        case spv::CapabilityDerivativeControl:
+        case spv::CapabilityStorageImageExtendedFormats:
+            return true;
+        default:
+            return false;
+    }
+}
+
 void CreateComputePipeline(VkDevice device, PFN_vkCreateComputePipelines create, VkPipelineCache cache, VkShaderModule module, VkPipelineLayout layout, VkPipelineCreateFlags flags, VkPipelineShaderStageCreateFlags stageFlags, const VkSpecializationInfo* specialization, std::uint32_t subgroupSize, VkPipeline* pipeline) {
     VkComputePipelineCreateInfo info{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
     info.flags = flags;
@@ -722,7 +740,7 @@ ComputePipelineReplayResult VulkanDevice::ReplayComputePipeline(const ComputePip
     for (std::size_t cursor = 5; cursor < capture.spirv.size(); cursor += capture.spirv[cursor] >> 16u) {
         const auto count = capture.spirv[cursor] >> 16u;
         if ((capture.spirv[cursor] & 0xffffu) == spv::OpCapability) {
-            require(count == 2 && std::ranges::find(target.supportedCapabilities, capture.spirv[cursor + 1]) != target.supportedCapabilities.end(), "captured SPIR-V capability is not enabled");
+            require(count == 2 && (CoreVulkanCapability(capture.spirv[cursor + 1]) || std::ranges::find(target.supportedCapabilities, capture.spirv[cursor + 1]) != target.supportedCapabilities.end()), "captured SPIR-V capability is not enabled");
         }
     }
 #if ANYPS5_ENABLE_SPIRV_TOOLS

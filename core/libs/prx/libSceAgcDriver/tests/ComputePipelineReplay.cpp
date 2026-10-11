@@ -38,6 +38,23 @@ int main() {
             std::printf("skipped, no usable Vulkan device: %s\n", error.what());
             return 77;
         }
+        auto sampled1D = decoded;
+        sampled1D.spirv.insert(sampled1D.spirv.begin() + 7, {0x00020011u, 43u});
+        CheckResult(device->ReplayComputePipeline(sampled1D));
+        std::puts("compute pipeline replay: core Vulkan Sampled1D capability compiled");
+        for (const auto capability : {6u, 0xffffffffu}) {
+            auto unsupported = decoded;
+            unsupported.spirv.insert(unsupported.spirv.begin() + 7, {0x00020011u, capability});
+            bool refused = false;
+            try {
+                device->ReplayComputePipeline(unsupported);
+            } catch (const std::exception& error) {
+                Require(std::string_view(error.what()) == "Vulkan presentation: captured SPIR-V capability is not enabled", "unsupported capability failed outside the replay capability guard");
+                refused = true;
+            }
+            Require(refused, "non-Vulkan or unknown SPIR-V capability accepted");
+        }
+        std::puts("compute pipeline replay: non-Vulkan Kernel and unknown capabilities rejected");
         const auto fresh = device->ReplayComputePipeline(decoded);
         CheckResult(fresh);
         Require(fresh.initialCacheBytes == 0, "fresh replay imported cache bytes");
