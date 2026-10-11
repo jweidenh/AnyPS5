@@ -1,6 +1,7 @@
 #include "BdaTests.hpp"
 #include "GraphicsTests.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
+#include "prx/libc/include/GuestArena.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Recorder.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Pipeline.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureDetiler.hpp"
@@ -2094,6 +2095,43 @@ ShaderRecompiler::DescriptorBinding makeBinding(Role role, std::uint32_t binding
     return result;
 }
 
+void oversizedDescriptorTests() {
+#ifdef _WIN32
+    if (!GuestArena::GuestArenaAvailable_nid_postfix()) {
+        std::cout << "guest arena unavailable: oversized buffer descriptors not tested\n";
+        return;
+    }
+    constexpr std::size_t reserved = 1u << 20u;
+    constexpr std::size_t committed = 65536;
+    void* block = GuestArena::GuestArenaAllocate_nid_postfix(reserved, 65536);
+    GuestArena::GuestArenaCommit_nid_postfix(block, committed, PAGE_READWRITE, 65536);
+    const auto address = reinterpret_cast<std::uintptr_t>(block);
+    const auto rangeOf = [&](std::uint64_t base) {
+        auto words = vsharp(reinterpret_cast<const void*>(base), 0xffffffffu);
+        words[1] |= 64u << 16u;
+        ShaderRecompiler::RecompileResult vertex;
+        ShaderRecompiler::RecompileResult fragment;
+        vertex.bindings.push_back(makeBinding(Role::GuestBuffers, 0, 1, words));
+        mock = MockVulkan{};
+        auto context = mockContext();
+        context.emptyBuffer = reinterpret_cast<VkBuffer>(std::uintptr_t{0x1000});
+        const auto color = AgcDriver::Graphics::DecodeState(makeState()).color;
+        VkDeviceSize range = 0;
+        {
+            AgcDriver::Graphics::ShaderResources resources(context, vertex, fragment, color, 0, 0);
+            Require(!mock.writes.empty() && !mock.writes.back().buffers.empty(), "an oversized buffer descriptor wrote no descriptor");
+            range = mock.writes.back().buffers.front().range;
+        }
+        Require(mock.live == 0, "oversized buffer descriptor resources leaked Vulkan objects");
+        return range;
+    };
+    Require(rangeOf(address) == mockContext().limits.maxStorageBufferRange, "a buffer descriptor past the range limit over committed memory was not cut at the limit");
+    Require(rangeOf(address + committed) == AgcDriver::Graphics::EmptyBufferBytes, "a buffer descriptor past the range limit over uncommitted memory was not bound empty");
+    GuestArena::GuestArenaReset_nid_postfix(block, reserved);
+    GuestArena::GuestArenaRelease_nid_postfix(block, reserved);
+#endif
+}
+
 std::vector<std::uint32_t> ShaderDataWords(std::initializer_list<std::uint32_t> userData) {
     std::vector<std::uint32_t> words(ShaderRecompiler::RuntimeAbi::ShaderDataDwords);
     words[0] = ShaderRecompiler::RuntimeAbi::Version;
@@ -2410,8 +2448,7 @@ void resourceTests() {
     expectSingleFailure(changed([](auto& binding) { binding.role = Role::FlattenedSrt; binding.guestDescriptor.clear(); }), "empty shader data descriptor");
     expectSingleFailure(changed([](auto& binding) { binding.guestDescriptor[1] |= 0x40000000u; }), "reserved bits");
     expectSingleFailure(changed([](auto& binding) { binding.guestDescriptor[3] |= 0x40000000u; }), "unsupported type");
-    expectSingleFailure(changed([](auto& binding) { binding.guestDescriptor[1] |= 0x3fffu << 16u; binding.guestDescriptor[2] = 0xffffffffu; }), "descriptor range limit");
-    expectSingleFailure(changed([](auto& binding) { binding.guestDescriptor[2] = 32768; }), "descriptor range limit");
+    oversizedDescriptorTests();
     expectSingleAccepted(changed([](auto& binding) { binding.guestDescriptor = vsharp(reinterpret_cast<const void*>(0x1000), 8); }), "an unmapped V#");
     expectSingleFailure(changed([&](auto& binding) { binding.guestDescriptor = vsharp(reinterpret_cast<const void*>(state.color.address), 64); }), "aliases the render target");
     expectSingleAccepted(changed([](auto& binding) { binding.count = 3; binding.guestDescriptor = join(join(vsharp(guestFirst.data(), 16), vsharp(guestSecond.data(), 32)), vsharp(reinterpret_cast<const void*>(0x1000), 8)); }), "an unmapped V# element");

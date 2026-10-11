@@ -2736,10 +2736,19 @@ std::size_t ShaderResources::addGuestBuffer(std::span<const std::uint32_t> words
     const ShaderRecompiler::ShaderBufferResource descriptor{{words[0], words[1], words[2], words[3]}};
     Require(descriptor.Type() == 0u, "buffer descriptor uses an unsupported type");
     const auto address = descriptor.Base48();
-    const auto byteSize = descriptor.GetSize();
+    auto byteSize = descriptor.GetSize();
     if (byteSize == 0 || address == 0) {
         allocations.push_back({0, EmptyBufferBytes, false, nullptr, ShaderRecompiler::DescriptorRole::GuestBuffers, false});
         return allocations.size() - 1;
+    }
+    if (byteSize > context.limits.maxStorageBufferRange) {
+        const auto limit = static_cast<std::uint64_t>(context.limits.maxStorageBufferRange) & ~std::uint64_t{3};
+        const auto committed = GuestMemory::CommittedRanges(address, static_cast<std::size_t>(limit), written);
+        if (committed.empty()) {
+            allocations.push_back({0, EmptyBufferBytes, false, nullptr, ShaderRecompiler::DescriptorRole::GuestBuffers, false});
+            return allocations.size() - 1;
+        }
+        byteSize = std::min(limit, ((committed.back().second - address) + 3u) & ~std::uint64_t{3});
     }
     Require(byteSize <= context.limits.maxStorageBufferRange, "shader buffer exceeds descriptor range limit");
     Require(byteSize <= std::numeric_limits<std::size_t>::max(), "shader buffer size exceeds host address space");
