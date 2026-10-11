@@ -2524,6 +2524,7 @@ void ResourceCache::noteMiss(const Key& key) {
 
 void ResourceCache::Insert(const Key& key, std::shared_ptr<ShaderResources> resources, std::vector<std::shared_ptr<ShaderResources>>* evicted) {
     std::lock_guard lock(mutex);
+    if (!resources->HasCachedStorageImages()) return;
     if (const auto found = index.find(key); found != index.end()) {
         if (evicted != nullptr) evicted->push_back(std::move(found->second->second));
         entries.erase(found->second);
@@ -3532,6 +3533,11 @@ bool ShaderResources::ReadsImage(const StorageTexture* image) const {
         if (texture != nullptr && texture->StorageSource() == image) return true;
     }
     return std::any_of(storageTextures.begin(), storageTextures.end(), [&](const auto& storage) { return storage.get() == image; });
+}
+
+bool ShaderResources::HasCachedStorageImages() const {
+    return std::all_of(storageTextures.begin(), storageTextures.end(), [](const auto& storage) { return storage->Cached(); }) &&
+        std::all_of(textures.begin(), textures.end(), [](const auto& texture) { const auto* source = texture->StorageSource(); return source == nullptr || source->Cached(); });
 }
 
 }

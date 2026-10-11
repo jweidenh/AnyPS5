@@ -1046,8 +1046,10 @@ if(BUILD_TESTING)
     set_tests_properties(agc_driver_storage_cache_budget PROPERTIES TIMEOUT 30)
     add_test(NAME agc_driver_sampled_cache_budget_memory COMMAND agc_driver_sampled_cache_budget_tests memory)
     set_tests_properties(agc_driver_sampled_cache_budget_memory PROPERTIES ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1" SKIP_RETURN_CODE 77)
+    add_test(NAME agc_driver_resource_cache_admission COMMAND agc_driver_sampled_cache_budget_tests admission)
+    set_tests_properties(agc_driver_resource_cache_admission PROPERTIES ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1" SKIP_RETURN_CODE 77 TIMEOUT 30)
     if(WIN32)
-        set_tests_properties(agc_driver_sampled_cache_budget_memory PROPERTIES ENVIRONMENT_MODIFICATION
+        set_tests_properties(agc_driver_sampled_cache_budget_memory agc_driver_resource_cache_admission PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
     add_test(NAME agc_driver_pm4_failure COMMAND agc_driver_pm4_tests failure)

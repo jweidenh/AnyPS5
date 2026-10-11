@@ -3,7 +3,9 @@
 #include "prx/libSceAgcDriver/Graphics/include/GuestBufferMemory.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Recorder.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ShaderResources.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/PlaceholderImages.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Texture.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/TextureCache.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureDetiler.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
 #include "VulkanTestDevice.hpp"
@@ -45,7 +47,7 @@ constexpr std::uint64_t Ceiling = Budget + Budget / 4u;
 
 class Device {
 public:
-    Device() {
+    explicit Device(bool resourceImages = false) {
 #ifdef _WIN32
         library = SDL_LoadObject("vulkan-1.dll");
 #else
@@ -93,6 +95,11 @@ public:
             queue.pQueuePriorities = &priority;
             VkPhysicalDeviceFeatures enabled{};
             enabled.shaderInt64 = VK_TRUE;
+            if (resourceImages) {
+                VkPhysicalDeviceFeatures supported{};
+                function<PFN_vkGetPhysicalDeviceFeatures>("vkGetPhysicalDeviceFeatures")(context.physical, &supported);
+                enabled.shaderStorageImageMultisample = supported.shaderStorageImageMultisample;
+            }
             address.pNext = &bytes;
             std::vector<const char*> extensionsEnabled{VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME, VK_KHR_8BIT_STORAGE_EXTENSION_NAME};
             if (hasExtension(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME)) {
@@ -205,6 +212,90 @@ std::shared_ptr<Texture> Sampled(const Context& context, std::uint64_t address, 
 GuestTextureResource Resource(std::uint64_t address, std::uint32_t side = Side) {
     const auto words = Descriptor(address, side);
     return DecodeTextureResource(words);
+}
+
+std::shared_ptr<ShaderResources> ImageResources(const Context& context, const Block& block, std::size_t first, std::uint32_t count, bool sampled) {
+    ShaderRecompiler::DescriptorBinding binding{};
+    binding.kind = sampled ? ShaderRecompiler::DescriptorKind::SampledImage : ShaderRecompiler::DescriptorKind::StorageImage;
+    binding.role = ShaderRecompiler::DescriptorRole::GuestImages;
+    binding.descriptorSet = 0;
+    binding.binding = (sampled ? ShaderRecompiler::RuntimeAbi::FirstImageBinding : ShaderRecompiler::RuntimeAbi::FirstStorageImageBinding) + PlaceholderDimensionsPerClass + 2u;
+    binding.count = count;
+    binding.imageShape = ShaderRecompiler::DescriptorImageShape::Image2D;
+    binding.imageWritten.assign(count, false);
+    binding.imageSamplers.assign(count, 0u);
+    for (std::uint32_t element = 0; element < count; ++element) {
+        const auto words = Descriptor(block.Surface(first + element));
+        binding.guestDescriptor.insert(binding.guestDescriptor.end(), words.begin(), words.end());
+    }
+    ShaderRecompiler::RecompileResult program;
+    program.bindings.push_back(std::move(binding));
+    const CompiledShader shader{ShaderRecompiler::ShaderStage::Compute, &program, 0};
+    return std::make_shared<ShaderResources>(context, shader);
+}
+
+void resourceAdmissionTests(Context context) {
+    Require(context.hostImportAlignment != 0, "resource cache admission requires external memory host imports");
+    PlaceholderImages placeholders(context);
+    context.placeholderImages = &placeholders;
+    TextureCache textures(context);
+    context.textureCache = &textures;
+    Block block(context);
+    Require(HostImportFor(context, block.Surface(0), BlockBytes) != nullptr, "resource cache admission could not import the texture block");
+    auto& cache = SharedResourceCache();
+    cache.Clear();
+    struct ClearResources {
+        ResourceCache& cache;
+        ~ClearResources() { cache.Clear(); }
+    } clear{cache};
+    for (const bool sampled : {false, true}) {
+        const std::string kind = sampled ? "sampled" : "storage";
+        auto active = ImageResources(context, block, 0, 1, sampled);
+        Require(active->Reusable(), kind + " descriptor set was not initially cacheable");
+        if (sampled) Require(active->SampledTextures().size() == 1 && active->SampledTextures().front()->ViewsStorageImage(), "the sampled admission fixture does not view a storage image");
+        const std::weak_ptr<ShaderResources> stale = active;
+        const std::weak_ptr<StorageTexture> image = StorageTexture::FindLive(block.Surface(0), SurfaceBytes);
+        Require(!image.expired(), kind + " resource has no cached storage image");
+        const auto imageCached = [&] { const auto current = image.lock(); return current != nullptr && current->Cached(); };
+        Require(imageCached(), kind + " resource's storage image was not initially cached");
+        std::size_t newest = 0;
+        for (std::size_t surface = 1; surface < Surfaces && imageCached(); ++surface) {
+            CachedStorageSurface(context, Resource(block.Surface(surface)));
+            newest = surface;
+        }
+        Require(!imageCached() && !image.expired(), kind + " fixture did not retain its evicted storage image through the active caller");
+        TextureCacheUsage();
+        auto live = ImageResources(context, block, newest, 1, sampled);
+        Require(live->Reusable() && StorageTexture::FindLive(block.Surface(newest), SurfaceBytes) != nullptr, kind + " replacement fixture has no live storage image");
+        cache.Insert({1}, live);
+        Require(cache.Find({1}) == live && cache.Size() == 1, kind + " live resource did not enter the cache");
+        std::vector<std::shared_ptr<ShaderResources>> displaced;
+        cache.Insert({2}, active, &displaced);
+        Require(cache.Find({2}) == nullptr && cache.Size() == 1 && displaced.empty(), kind + " resource cache admitted an already-evicted storage image");
+        cache.Insert({1}, active, &displaced);
+        Require(cache.Find({1}) == live && cache.Size() == 1 && displaced.empty(), kind + " stale resource replaced a live cache entry");
+        Require(!stale.expired() && !image.expired(), kind + " rejection destroyed an active caller's resources");
+        active.reset();
+        TextureCacheUsage();
+        Require(stale.expired() && image.expired(), kind + " rejected resource retained its evicted storage image");
+        std::printf("resource cache admission %s stale insertion and replacement passed\n", kind.c_str());
+        cache.Clear();
+        live.reset();
+        ClearCachedTextures(context.device);
+        const std::weak_ptr<StorageTexture> early = CachedStorageSurface(context, Resource(block.Surface(0)));
+        auto oversized = ImageResources(context, block, 0, static_cast<std::uint32_t>(Surfaces), sampled);
+        const std::weak_ptr<ShaderResources> rejected = oversized;
+        Require(oversized->Reusable(), kind + " oversized descriptor set was not eligible for resource caching");
+        Require(!early.expired() && !early.lock()->Cached(), kind + " oversized descriptor set did not retain an early evicted image");
+        if (sampled) Require(oversized->SampledTextures().size() == Surfaces && oversized->SampledTextures().front()->StorageSource() == early.lock().get(), "the oversized sampled descriptor set does not retain the early storage image");
+        cache.Insert({3}, oversized, &displaced);
+        Require(cache.Size() == 0 && displaced.empty(), kind + " descriptor set built across eviction entered the resource cache");
+        oversized.reset();
+        TextureCacheUsage();
+        Require(rejected.expired() && early.expired(), kind + " rejected oversized set retained an evicted storage image");
+        std::printf("resource cache admission %s oversized descriptors passed\n", kind.c_str());
+        ClearCachedTextures(context.device);
+    }
 }
 
 void viewTests(const Context& context) {
@@ -482,6 +573,7 @@ void memoryTests(Context context) {
 int main(int argc, char** argv) {
     try {
         const bool memory = argc > 1 && std::string(argv[1]) == "memory";
+        const bool admission = argc > 1 && std::string(argv[1]) == "admission";
 #ifdef _WIN32
         if (!memory) _putenv_s("APS5_TEXTURE_CACHE_MIB", "1");
 #else
@@ -489,7 +581,7 @@ int main(int argc, char** argv) {
 #endif
         std::unique_ptr<Device> device;
         try {
-            device = std::make_unique<Device>();
+            device = std::make_unique<Device>(admission);
         } catch (const std::exception& error) {
             if (std::getenv("ANYPS5_REQUIRE_VULKAN") != nullptr) throw;
             std::printf("skipped, no usable Vulkan device: %s\n", error.what());
@@ -498,6 +590,12 @@ int main(int argc, char** argv) {
         auto context = device->GetContext();
         TextureDetiler detiler(context);
         context.detiler = &detiler;
+        if (admission) {
+            std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
+            resourceAdmissionTests(context);
+            std::puts("resource cache admission tests passed");
+            return 0;
+        }
         if (memory) {
             std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
             memoryTests(context);
