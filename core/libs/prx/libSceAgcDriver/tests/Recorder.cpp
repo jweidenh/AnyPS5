@@ -3032,7 +3032,7 @@ void storageUploadLifetimeTests(const Device& device, Recorder& previous, bool f
     DccKeyProof proof;
     Require(ProvedClearKeys(resource, guestBytes, proof) == DccKeys::Clear0000, "storage lifetime fixture has no DCC clear");
     StorageUploadProbe probe(context, failView);
-    Buffer readback(context, resource.width * resource.height * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+    Buffer readback(device.GetContext(), resource.width * resource.height * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
     std::memset(readback.Bytes().data(), 0x55, readback.Bytes().size());
     std::weak_ptr<StorageTexture> lifetime;
     bool premature = false;
