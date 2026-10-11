@@ -29,6 +29,7 @@ class VulkanDevice;
 namespace AgcDriver::DriverDetail {
 
 struct ShaderSnapshot;
+class ShaderPreparationTransaction;
 using ShaderRegistry = std::map<std::uint64_t, std::vector<std::shared_ptr<const ShaderSnapshot>>>;
 
 struct PreparedShaderState {
@@ -102,6 +103,7 @@ void SubmitRegistrationPreparation(std::function<void()> task);
 void CloseRegistrationPreparation();
 
 void ResolvePreparedGraphics(const ShaderSnapshot& front, const std::shared_ptr<const ShaderSnapshot>& fragment, std::uint32_t primitiveType, const ShaderRecompiler::SpirvTarget& target);
+void ResolveRegisteredShaderAbi(ShaderPreparationTransaction& transaction, const ShaderSnapshot& snapshot, const VulkanDevice& device, const QueueState& state);
 
 ShaderRecompiler::RectListShaders PreparedRectangle(const ShaderSnapshot& snapshot, std::uint64_t vertexId, std::uint64_t fragmentId);
 ShaderRecompiler::RectListShaders DrawRectangle(const ShaderSnapshot& front, const std::shared_ptr<const ShaderSnapshot>& fragment, std::uint64_t vertexId, std::uint64_t fragmentId, const ShaderRecompiler::SpirvTarget& target);

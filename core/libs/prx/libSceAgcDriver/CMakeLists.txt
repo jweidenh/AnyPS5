@@ -965,6 +965,9 @@ target_include_directories(agc_driver_prepared_publication_tests PRIVATE $<TARGE
 
 target_include_directories(agc_driver_registration_concurrency_tests PRIVATE $<TARGET_PROPERTY:shader_recompiler_agc_driver,INTERFACE_INCLUDE_DIRECTORIES>)
 
+target_include_directories(agc_driver_abi_preparation_concurrency_tests PRIVATE $<TARGET_PROPERTY:shader_recompiler_agc_driver,INTERFACE_INCLUDE_DIRECTORIES>)
+target_link_libraries(agc_driver_abi_preparation_concurrency_tests PRIVATE libSceAgc)
+
 target_include_directories(agc_driver_prepared_graphics_tests PRIVATE $<TARGET_PROPERTY:shader_recompiler_agc_driver,INTERFACE_INCLUDE_DIRECTORIES>)
 target_link_libraries(agc_driver_interpolation_modes_tests PRIVATE shader_recompiler_agc_driver)
 
@@ -1040,6 +1043,14 @@ if(BUILD_TESTING)
     if(WIN32)
         set_tests_properties(agc_driver_registration_concurrency_sync PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
+    set_tests_properties(agc_driver_abi_preparation_concurrency PROPERTIES TIMEOUT 30)
+    set_property(TEST agc_driver_abi_preparation_concurrency APPEND PROPERTY ENVIRONMENT_MODIFICATION "APS5_SYNC_SHADER_PREPARE=unset:")
+    add_test(NAME agc_driver_abi_preparation_concurrency_sync COMMAND agc_driver_abi_preparation_concurrency_tests)
+    set_tests_properties(agc_driver_abi_preparation_concurrency_sync PROPERTIES ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1;APS5_SYNC_SHADER_PREPARE=1" SKIP_RETURN_CODE 77 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 30)
+    if(WIN32)
+        set_tests_properties(agc_driver_abi_preparation_concurrency_sync PROPERTIES ENVIRONMENT_MODIFICATION
+                "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
     add_test(NAME agc_driver_sampled_cache_budget_memory COMMAND agc_driver_sampled_cache_budget_tests memory)
     set_tests_properties(agc_driver_sampled_cache_budget_memory PROPERTIES ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1" SKIP_RETURN_CODE 77)
