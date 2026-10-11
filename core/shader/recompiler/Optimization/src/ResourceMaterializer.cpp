@@ -192,7 +192,7 @@ DecodedImage decodeImageDescriptor(const DescriptorValue& descriptor, const Imag
         }
     }
     decoded.srgbDecode = !storage && (srgbDecodeFormats & SrgbDecodeBit(format)) != 0u;
-    if (decoded.srgbDecode && !base.srgbDecodeCompatible) {
+    if (decoded.srgbDecode && !base.srgbDecodeCompatible && !base.depthCompare) {
         throw std::runtime_error("samples or gathers an sRGB image the device cannot sample, which is not implemented");
     }
     if (storage || decoded.conversionFormat != IrBufferFormat::Invalid) {
