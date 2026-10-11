@@ -1,5 +1,6 @@
 #include "BdaTests.hpp"
 #include "GraphicsTests.hpp"
+#include "OversizedDescriptorMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libc/include/GuestArena.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Recorder.hpp"
@@ -17,6 +18,7 @@
 #include "ControlFlow/RequestSerializer.hpp"
 #include "CacheKey.hpp"
 #include "Optimization/ResourceProgram.hpp"
+#include "Optimization/ShaderStageInputInfo.hpp"
 #include "BdaAbi.hpp"
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include <spirv/unified1/spirv.hpp>
@@ -2095,41 +2097,70 @@ ShaderRecompiler::DescriptorBinding makeBinding(Role role, std::uint32_t binding
     return result;
 }
 
-void oversizedDescriptorTests() {
-#ifdef _WIN32
-    if (!GuestArena::GuestArenaAvailable_nid_postfix()) {
-        std::cout << "guest arena unavailable: oversized buffer descriptors not tested\n";
-        return;
+VkDeviceSize oversizedDescriptorRange(std::uint64_t address, std::uint32_t limit, bool written = false, std::uint32_t bytes = 0xffffffffu, std::uint32_t stride = 64) {
+    auto words = vsharp(reinterpret_cast<const void*>(address), bytes);
+    words[1] |= stride << 16u;
+    ShaderRecompiler::RecompileResult vertex;
+    ShaderRecompiler::RecompileResult fragment;
+    auto binding = makeBinding(Role::GuestBuffers, 0, 1, words);
+    binding.bufferWritten = {written};
+    vertex.bindings.push_back(std::move(binding));
+    mock = MockVulkan{};
+    auto context = mockContext();
+    context.limits.maxStorageBufferRange = limit;
+    context.emptyBuffer = reinterpret_cast<VkBuffer>(std::uintptr_t{0x1000});
+    const auto color = AgcDriver::Graphics::DecodeState(makeState()).color;
+    VkDeviceSize range = 0;
+    try {
+        AgcDriver::Graphics::ShaderResources resources(context, vertex, fragment, color, 0, 0);
+        Require(!mock.writes.empty() && !mock.writes.back().buffers.empty(), "an oversized buffer descriptor wrote no descriptor");
+        range = mock.writes.back().buffers.front().range;
+    } catch (...) {
+        Require(mock.live == 0, "rejected oversized buffer descriptor resources leaked Vulkan objects");
+        throw;
     }
-    constexpr std::size_t reserved = 1u << 20u;
-    constexpr std::size_t committed = 65536;
-    void* block = GuestArena::GuestArenaAllocate_nid_postfix(reserved, 65536);
-    GuestArena::GuestArenaCommit_nid_postfix(block, committed, PAGE_READWRITE, 65536);
-    const auto address = reinterpret_cast<std::uintptr_t>(block);
-    const auto rangeOf = [&](std::uint64_t base) {
-        auto words = vsharp(reinterpret_cast<const void*>(base), 0xffffffffu);
-        words[1] |= 64u << 16u;
-        ShaderRecompiler::RecompileResult vertex;
-        ShaderRecompiler::RecompileResult fragment;
-        vertex.bindings.push_back(makeBinding(Role::GuestBuffers, 0, 1, words));
-        mock = MockVulkan{};
-        auto context = mockContext();
-        context.emptyBuffer = reinterpret_cast<VkBuffer>(std::uintptr_t{0x1000});
-        const auto color = AgcDriver::Graphics::DecodeState(makeState()).color;
-        VkDeviceSize range = 0;
-        {
-            AgcDriver::Graphics::ShaderResources resources(context, vertex, fragment, color, 0, 0);
-            Require(!mock.writes.empty() && !mock.writes.back().buffers.empty(), "an oversized buffer descriptor wrote no descriptor");
-            range = mock.writes.back().buffers.front().range;
-        }
-        Require(mock.live == 0, "oversized buffer descriptor resources leaked Vulkan objects");
-        return range;
-    };
-    Require(rangeOf(address) == mockContext().limits.maxStorageBufferRange, "a buffer descriptor past the range limit over committed memory was not cut at the limit");
-    Require(rangeOf(address + committed) == AgcDriver::Graphics::EmptyBufferBytes, "a buffer descriptor past the range limit over uncommitted memory was not bound empty");
-    GuestArena::GuestArenaReset_nid_postfix(block, reserved);
-    GuestArena::GuestArenaRelease_nid_postfix(block, reserved);
-#endif
+    Require(mock.live == 0, "oversized buffer descriptor resources leaked Vulkan objects");
+    return range;
+}
+
+void oversizedDescriptorLimitTests() {
+    constexpr auto unit = OversizedDescriptorMemory::Unit;
+    constexpr std::uint32_t limit = 2 * unit;
+    OversizedDescriptorMemory memory;
+    memory.Commit(0, 4);
+    Require(oversizedDescriptorRange(memory.Address(), limit, false, limit, 0) == limit, "a buffer descriptor exactly at the range limit was rejected");
+    expectFailure([&] { oversizedDescriptorRange(memory.Address(), limit); }, "shader buffer exceeds descriptor range limit");
+    expectFailure([&] { oversizedDescriptorRange(memory.Address(2), limit); }, "shader buffer exceeds descriptor range limit");
+    Require(oversizedDescriptorRange(memory.Address(3), limit) == unit, "an oversized buffer descriptor did not keep its short committed prefix");
+    Require(oversizedDescriptorRange(memory.Address(4), limit) == AgcDriver::Graphics::EmptyBufferBytes, "an uncommitted oversized buffer descriptor was not bound empty");
+    constexpr std::uint64_t reportedAddress = 0x55268c155511;
+    constexpr std::uint32_t reportedStride = 9675;
+    constexpr std::uint32_t reportedRecords = 0xc19c7185;
+    static_assert(std::uint64_t{reportedStride} * reportedRecords == 0x1c9523763d77);
+    const ShaderRecompiler::ShaderBufferResource reported{{static_cast<std::uint32_t>(reportedAddress), static_cast<std::uint32_t>(reportedAddress >> 32u) | (reportedStride << 16u), reportedRecords, 0x31000000u}};
+    Require(reported.Base48() == reportedAddress && reported.GetSize() == 0x1c9523763d77, "reported oversized buffer descriptor was decoded incorrectly");
+    OversizedDescriptorMemory uncommitted;
+    Require(oversizedDescriptorRange(uncommitted.Address() + (reportedAddress & 0xffffu), limit, false, reportedRecords, reportedStride) == AgcDriver::Graphics::EmptyBufferBytes, "the reported oversized buffer descriptor was not bound empty");
+}
+
+void oversizedDescriptorGapTests() {
+    constexpr auto unit = OversizedDescriptorMemory::Unit;
+    OversizedDescriptorMemory memory;
+    memory.Commit(0, 1);
+    memory.Commit(2, 1);
+    Require(oversizedDescriptorRange(memory.Address(), 3 * unit) == unit, "oversized buffer descriptor crossed an inaccessible gap");
+    Require(oversizedDescriptorRange(memory.Address(1), 2 * unit) == AgcDriver::Graphics::EmptyBufferBytes, "oversized buffer descriptor skipped a leading inaccessible gap");
+    OversizedDescriptorMemory permissions;
+    permissions.Commit(0, 1);
+    permissions.Commit(1, 1, true);
+    permissions.Commit(2, 1);
+    Require(oversizedDescriptorRange(permissions.Address(), 4 * unit) == 3 * unit, "read-only oversized buffer descriptor stopped at readable memory");
+    Require(oversizedDescriptorRange(permissions.Address(), 4 * unit, true) == unit, "written oversized buffer descriptor crossed a read-only gap");
+}
+
+void oversizedDescriptorTests() {
+    oversizedDescriptorLimitTests();
+    oversizedDescriptorGapTests();
 }
 
 std::vector<std::uint32_t> ShaderDataWords(std::initializer_list<std::uint32_t> userData) {
@@ -4285,6 +4316,16 @@ int main(int argc, char** argv) {
     setenv("APS5_HEAP_MIRROR_MIB", "4", 1);
 #endif
     try {
+        if (argc == 2 && std::string_view(argv[1]) == "--oversized-descriptor-limit") {
+            oversizedDescriptorLimitTests();
+            std::cout << "Oversized descriptor limit tests passed\n";
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "--oversized-descriptor-gap") {
+            oversizedDescriptorGapTests();
+            std::cout << "Oversized descriptor gap tests passed\n";
+            return 0;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "--descriptor-pool-reset-failure") {
             descriptorPoolResetFailureTest();
             std::cerr << "descriptor pool reset failure did not terminate\n";

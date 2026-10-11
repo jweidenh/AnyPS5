@@ -1,0 +1,9 @@
+#version 450
+layout(local_size_x = 1) in;
+layout(set = 0, binding = 0, std430) readonly buffer Input { uint words[]; } source;
+layout(set = 0, binding = 1, std430) writeonly buffer Output { uint words[]; } result;
+void main() {
+    result.words[0] = source.words.length();
+    result.words[1] = source.words[0];
+    result.words[2] = source.words[16383];
+}

@@ -725,9 +725,23 @@ target_link_libraries(agc_driver_cmask_fast_clear_tests PRIVATE
 set_target_properties(agc_driver_cmask_fast_clear_tests PROPERTIES CXX_EXTENSIONS OFF)
 configure_windows_unwind(agc_driver_cmask_fast_clear_tests)
 
+set(agcOversizedDescriptorShaderSource ${CMAKE_CURRENT_SOURCE_DIR}/tests/shaders/OversizedDescriptor.comp)
+set(agcOversizedDescriptorShaderSpv ${agcTestShaderGeneratedRoot}/OversizedDescriptor.spv)
+set(agcOversizedDescriptorShaderHeader ${agcTestShaderGeneratedRoot}/OversizedDescriptor_spv.h)
+add_custom_command(
+        OUTPUT "${agcOversizedDescriptorShaderHeader}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${agcTestShaderGeneratedRoot}"
+        COMMAND "$<TARGET_FILE:glslang-standalone>" -V --target-env vulkan1.1 -o "${agcOversizedDescriptorShaderSpv}" "${agcOversizedDescriptorShaderSource}"
+        COMMAND ${CMAKE_COMMAND} -DINPUT=${agcOversizedDescriptorShaderSpv} -DOUTPUT=${agcOversizedDescriptorShaderHeader}
+        -DSYMBOL=OVERSIZED_DESCRIPTOR_SPV -P "${CMAKE_CURRENT_SOURCE_DIR}/embed_spirv.cmake"
+        DEPENDS "${agcOversizedDescriptorShaderSource}" glslang-standalone
+        VERBATIM
+)
+
 add_test_executable(agc_driver_recorder_tests EXCLUDE_FROM_ALL
         tests/Recorder.cpp
         tests/ResidentPresent.cpp
+        ${agcOversizedDescriptorShaderHeader}
         ${agcTriangleHeaders}
         ${agcSampleLodShaderHeader}
         ${agcSampleArrayShaderHeader}
@@ -1052,6 +1066,15 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME agc_driver_pm4_failure COMMAND agc_driver_pm4_tests failure)
     set_tests_properties(agc_driver_pm4_failure PROPERTIES ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1" SKIP_RETURN_CODE 77)
+    add_test(NAME agc_oversized_descriptor_limit COMMAND agc_driver_graphics_tests --oversized-descriptor-limit)
+    add_test(NAME agc_oversized_descriptor_gap COMMAND agc_driver_graphics_tests --oversized-descriptor-gap)
+    add_test(NAME agc_oversized_descriptor_readback COMMAND agc_driver_recorder_tests --oversized-descriptor-readback)
+    set_tests_properties(agc_oversized_descriptor_limit agc_oversized_descriptor_gap agc_oversized_descriptor_readback PROPERTIES TIMEOUT 30)
+    set_tests_properties(agc_oversized_descriptor_readback PROPERTIES SKIP_RETURN_CODE 77)
+    if(WIN32)
+        set_tests_properties(agc_oversized_descriptor_limit agc_oversized_descriptor_gap agc_oversized_descriptor_readback PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
     add_test(NAME agc_descriptor_pool_reset_failure COMMAND agc_driver_graphics_tests --descriptor-pool-reset-failure)
     if(WIN32)
         set_tests_properties(agc_driver_pm4_failure agc_descriptor_pool_reset_failure PROPERTIES ENVIRONMENT_MODIFICATION

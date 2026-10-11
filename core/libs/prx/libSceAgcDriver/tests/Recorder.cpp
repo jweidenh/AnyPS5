@@ -25,6 +25,8 @@
 #include "prx/libc/include/GuestWriteWatch.hpp"
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include "ResidentPresent.hpp"
+#include "OversizedDescriptorMemory.hpp"
+#include "OversizedDescriptor_spv.h"
 #include "SampleLod_spv.h"
 #include "SampleArray_spv.h"
 #include "Cover_vert_spv.h"
@@ -251,6 +253,7 @@ public:
             VkPhysicalDeviceProperties properties{};
             function<PFN_vkGetPhysicalDeviceProperties>("vkGetPhysicalDeviceProperties")(context.physical, &properties);
             context.limits = properties.limits;
+            std::cout << "Vulkan device: " << properties.deviceName << '\n';
             context.bufferDeviceAddress = true;
             context.formatProperties = function<PFN_vkGetPhysicalDeviceFormatProperties>("vkGetPhysicalDeviceFormatProperties");
             context.imageFormatProperties = function<PFN_vkGetPhysicalDeviceImageFormatProperties>("vkGetPhysicalDeviceImageFormatProperties");
@@ -1125,6 +1128,74 @@ void viewPastLastMipTests(const Device& device, Recorder& recorder) {
     Require(CachedStorageSurface(context, allocatedView) == past, "a view of the allocated levels took another image than the view past the last mip");
     Require(texel(*past, 2) == 0x66666666u, "level 2 was not read from its addrlib tail slot");
     Require(texel(*past, 3) == 0x77777777u, "the level past the last mip was not read from its addrlib tail slot");
+}
+
+void oversizedDescriptorReadbackTests(const Device& device, Recorder& recorder) {
+    constexpr auto unit = OversizedDescriptorMemory::Unit;
+    OversizedDescriptorMemory memory;
+    memory.Commit(0, 1);
+    memory.Commit(2, 1);
+    auto* input = static_cast<std::uint32_t*>(memory.Data());
+    input[0] = 0x7fc01234;
+    input[unit / sizeof(std::uint32_t) - 1] = 0x80000000;
+    std::array<std::uint32_t, 3> output{};
+    auto context = device.GetContext();
+    Require(context.limits.maxStorageBufferRange >= 3 * unit, "Vulkan device range limit is too small for the oversized descriptor fixture");
+    context.limits.maxStorageBufferRange = 3 * unit;
+    context.hostImportAlignment = 0;
+    context.dmaBufImport = false;
+    ShaderRecompiler::RecompileResult program;
+    const auto addBinding = [&](std::uint32_t index, std::uint64_t address, std::uint32_t bytes, std::uint32_t stride, bool written) {
+        ShaderRecompiler::DescriptorBinding binding;
+        binding.kind = ShaderRecompiler::DescriptorKind::StorageBuffer;
+        binding.role = ShaderRecompiler::DescriptorRole::GuestBuffers;
+        binding.descriptorSet = 0;
+        binding.binding = index;
+        binding.count = 1;
+        binding.guestDescriptor = {static_cast<std::uint32_t>(address), static_cast<std::uint32_t>((address >> 32u) & 0xffffu) | (stride << 16u), bytes, 0x31000000u};
+        binding.bufferWritten = {written};
+        program.bindings.push_back(std::move(binding));
+    };
+    addBinding(0, memory.Address(), 0xffffffffu, 64, false);
+    addBinding(1, reinterpret_cast<std::uintptr_t>(output.data()), sizeof(output), 0, true);
+    const CompiledShader compute{ShaderRecompiler::ShaderStage::Compute, &program, 0};
+    ShaderResources resources(context, compute);
+    struct PipelineHandles {
+        const Context& context;
+        VkPipelineLayout layout = VK_NULL_HANDLE;
+        VkShaderModule module = VK_NULL_HANDLE;
+        VkPipeline pipeline = VK_NULL_HANDLE;
+        ~PipelineHandles() {
+            if (pipeline != VK_NULL_HANDLE) context.Function<PFN_vkDestroyPipeline>("vkDestroyPipeline")(context.device, pipeline, nullptr);
+            if (module != VK_NULL_HANDLE) context.Function<PFN_vkDestroyShaderModule>("vkDestroyShaderModule")(context.device, module, nullptr);
+            if (layout != VK_NULL_HANDLE) context.Function<PFN_vkDestroyPipelineLayout>("vkDestroyPipelineLayout")(context.device, layout, nullptr);
+        }
+    } handles{context};
+    const auto setLayout = resources.Layout();
+    VkPipelineLayoutCreateInfo layoutInfo{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    layoutInfo.setLayoutCount = 1;
+    layoutInfo.pSetLayouts = &setLayout;
+    Check(context.Function<PFN_vkCreatePipelineLayout>("vkCreatePipelineLayout")(context.device, &layoutInfo, nullptr, &handles.layout), "vkCreatePipelineLayout");
+    VkShaderModuleCreateInfo moduleInfo{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+    moduleInfo.codeSize = sizeof(OVERSIZED_DESCRIPTOR_SPV);
+    moduleInfo.pCode = OVERSIZED_DESCRIPTOR_SPV;
+    Check(context.Function<PFN_vkCreateShaderModule>("vkCreateShaderModule")(context.device, &moduleInfo, nullptr, &handles.module), "vkCreateShaderModule");
+    VkComputePipelineCreateInfo pipelineInfo{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+    pipelineInfo.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_COMPUTE_BIT, handles.module, "main", nullptr};
+    pipelineInfo.layout = handles.layout;
+    Check(context.Function<PFN_vkCreateComputePipelines>("vkCreateComputePipelines")(context.device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &handles.pipeline), "vkCreateComputePipelines");
+    const auto commands = recorder.Commands();
+    RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_HOST_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+    context.Function<PFN_vkCmdBindPipeline>("vkCmdBindPipeline")(commands, VK_PIPELINE_BIND_POINT_COMPUTE, handles.pipeline);
+    resources.Bind(commands, VK_PIPELINE_BIND_POINT_COMPUTE, handles.layout);
+    context.Function<PFN_vkCmdDispatch>("vkCmdDispatch")(commands, 1, 1, 1);
+    RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT);
+    recorder.Submit();
+    device.WaitQueue();
+    recorder.Sync();
+    resources.WriteBack();
+    Require(output[0] == unit / sizeof(std::uint32_t), "oversized buffer descriptor exposed bytes beyond its committed prefix");
+    Require(output[1] == input[0] && output[2] == input[unit / sizeof(std::uint32_t) - 1], "oversized buffer descriptor changed its committed prefix during GPU readback");
 }
 
 void resourceReadTests(const Device& device, Recorder& recorder) {
@@ -4933,6 +5004,11 @@ int main(int argc, char** argv) {
         std::cout << "host imports " << (PrepareImportWatch(device.GetContext()) == ImportWatch::Unwatch ? "are compared" : "stay watched") << '\n';
         Recorder recorder(device.GetContext());
         recorder.Activate();
+        if (argc == 2 && std::string_view(argv[1]) == "--oversized-descriptor-readback") {
+            oversizedDescriptorReadbackTests(device, recorder);
+            std::cout << "Oversized descriptor readback tests passed\n";
+            return 0;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "--cube-only") {
             singleCubeTests(device, recorder);
             std::cout << "Single cube snapshot and storage sampling tests passed\n";
