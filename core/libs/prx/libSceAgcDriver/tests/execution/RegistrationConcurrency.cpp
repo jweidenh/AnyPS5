@@ -123,6 +123,38 @@ void PreparationWhilePublicationBlocked(const ComputeFixture& invalid, const cha
     Require(prepared, "private shader preparation waited for an unrelated publication transaction");
 }
 
+void DuplicateWhilePublicationBlocked(const ComputeFixture& invalid, const char* expected) {
+    ComputeFixture warm;
+    warm.header.registers[2].value = 16;
+    AgcDriverRegisterShader_nid_postfix(&warm.header.shader);
+    std::promise<void> created;
+    auto started = created.get_future();
+    std::future<void> duplicate;
+    std::future<void> worker;
+    bool duplicateStarted = false;
+    bool duplicateBlocked = false;
+    bool prepared = false;
+    {
+        ShaderPreparationTransaction held;
+        duplicate = std::async(std::launch::async, [&] {
+            created.set_value();
+            AgcDriverRegisterShader_nid_postfix(&warm.header.shader);
+        });
+        duplicateStarted = started.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+        duplicateBlocked = duplicate.wait_for(std::chrono::milliseconds(100)) == std::future_status::timeout;
+        worker = std::async(std::launch::async, [&] {
+            ExpectFailure([&] { AgcDriverRegisterShader_nid_postfix(&invalid.header.shader); }, expected);
+        });
+        prepared = worker.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+        held.Commit();
+    }
+    duplicate.get();
+    worker.get();
+    Require(duplicateStarted, "duplicate shader registration did not start while publication was blocked");
+    Require(duplicateBlocked, "duplicate shader registration bypassed the publication transaction");
+    Require(prepared, "duplicate shader registration held the driver mutex while waiting for publication");
+}
+
 void NestedFailure(const ComputeFixture& invalid, const char* expected) {
     AgcDriver::DriverDetail::ShaderSnapshot pending;
     {
@@ -184,6 +216,7 @@ int main() {
         if (!synchronous) invalid.header.registers[2].value = 0;
         const auto* expected = synchronous ? "s_sendmsghalt 1 at pc 0 halts the wave" : "COMPUTE_NUM_THREAD_X/Y/Z must be nonzero";
         PreparationWhilePublicationBlocked(invalid, expected);
+        DuplicateWhilePublicationBlocked(invalid, expected);
         NestedFailure(invalid, expected);
         ConcurrentRegistrations();
         AgcDriverShutdown_nid_postfix();
