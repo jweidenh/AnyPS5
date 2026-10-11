@@ -142,7 +142,8 @@ std::uint32_t LoadWordPrepared(SpirvValueEmitContext& ctx, const IrValue& inst, 
     auto& state = ctx.state;
     const auto index = EmitMemoryElementIndex(state, resource, DwordIndex(ctx, inst, mem));
     const auto enable = LoadEnable(state, resource, index, active);
-    return EmitValueOrZero(state, enable, LoadWordInBounds(ctx, resource, EmitValueOrZero(state, enable, index)));
+    if (!LoadsSelectable(state, resource)) return EmitValueOrZeroIfCondition(state, enable, [&] { return LoadWordInBounds(ctx, resource, index); });
+    return EmitValueOrZero(state, enable, LoadWordInBounds(ctx, resource, GuardedElementIndex(state, resource, enable, index)));
 }
 
 std::uint32_t LoadWord(SpirvValueEmitContext& ctx, const IrValue& inst, const MemoryInfo& mem) {
@@ -155,7 +156,8 @@ std::uint32_t LoadSubwordPrepared(SpirvValueEmitContext& ctx, const IrValue& ins
     const auto rawIndex = Binary(state, spv::OpShiftRightLogical, TypeU32(state), address, ConstantU32(state, 2u));
     const auto index = EmitMemoryElementIndex(state, resource, rawIndex);
     const auto enable = LoadEnable(state, resource, index, active);
-    return EmitValueOrZero(state, enable, LoadSubwordInBounds(ctx, resource, address, EmitValueOrZero(state, enable, index), bits, signExtend));
+    if (!LoadsSelectable(state, resource)) return EmitValueOrZeroIfCondition(state, enable, [&] { return LoadSubwordInBounds(ctx, resource, address, index, bits, signExtend); });
+    return EmitValueOrZero(state, enable, LoadSubwordInBounds(ctx, resource, address, GuardedElementIndex(state, resource, enable, index), bits, signExtend));
 }
 
 std::uint32_t LoadSubword(SpirvValueEmitContext& ctx, const IrValue& inst, const MemoryInfo& mem, std::uint32_t bits) {
@@ -294,7 +296,8 @@ std::uint32_t LoadWideShared(SpirvValueEmitContext& ctx, const IrValue& inst, co
         const auto rawIndex = Binary(state, spv::OpShiftRightLogical, TypeU32(state), address, ConstantU32(state, 2u));
         const auto index = EmitMemoryElementIndex(state, resource, rawIndex);
         const auto enable = LoadEnable(state, resource, index, active);
-        values.at(component) = EmitValueOrZero(state, enable, LoadWordInBounds(ctx, resource, EmitValueOrZero(state, enable, index)));
+        values.at(component) = LoadsSelectable(state, resource) ? EmitValueOrZero(state, enable, LoadWordInBounds(ctx, resource, GuardedElementIndex(state, resource, enable, index)))
+                                                                : EmitValueOrZeroIfCondition(state, enable, [&] { return LoadWordInBounds(ctx, resource, index); });
     }
     return ConstructU32Composite(state, components, values);
 }
