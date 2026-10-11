@@ -699,6 +699,19 @@ std::vector<std::pair<std::uint64_t, std::uint64_t>> CommittedRanges(std::uint64
     return DescribeCommitted(address, bytes, writable).ranges;
 }
 
+std::size_t CommittedPrefixBytes(std::uint64_t address, std::size_t bytes, bool writable) {
+    require(bytes <= std::numeric_limits<std::uint64_t>::max() - address, "address range overflow");
+    const TimedAccess timed(CounterVerify, bytes);
+    auto end = address;
+    const bool queried = describePages(static_cast<std::uintptr_t>(address), bytes, [&](const PageRun& run) {
+        if (!run.readable || (writable && !run.writable)) return false;
+        end = run.end;
+        return true;
+    });
+    require(queried, "cannot query guest memory");
+    return static_cast<std::size_t>(end - address);
+}
+
 namespace {
 
 constexpr std::size_t WriteBlockBytes = 65536;

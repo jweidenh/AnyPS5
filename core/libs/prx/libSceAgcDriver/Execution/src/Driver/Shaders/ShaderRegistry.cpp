@@ -61,13 +61,7 @@ std::shared_ptr<const ShaderSnapshot> ReadRawShader(std::uint64_t address) {
         }
     }
     constexpr std::size_t limit = 1024 * 1024;
-    const auto ranges = GuestMemory::CommittedRanges(address, limit);
-    std::uint64_t end = address;
-    for (const auto& range : ranges) {
-        if (range.first != end) break;
-        end = range.second;
-    }
-    const auto available = static_cast<std::size_t>(end - address) / sizeof(std::uint32_t);
+    const auto available = GuestMemory::CommittedPrefixBytes(address, limit) / sizeof(std::uint32_t);
     ShaderSnapshot snapshot{address, 0, 0, {}, {}};
     while (snapshot.code.size() < available) {
         const auto previous = snapshot.code.size();
