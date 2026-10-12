@@ -5437,8 +5437,9 @@ int main(int argc, char** argv) {
             return 77;
         }
         Device& device = *created;
-        if (argc == 2 && std::string_view(argv[1]) == "--host-import-retirement-only") {
-            const auto alignment = device.GetContext().hostImportAlignment;
+        if (argc == 2 && (std::string_view(argv[1]) == "--host-import-retirement-only" || std::string_view(argv[1]) == "--host-import-retirement-no-host-imports" || std::string_view(argv[1]) == "--host-import-retirement-large-alignment")) {
+            const auto mode = std::string_view(argv[1]);
+            const auto alignment = mode == "--host-import-retirement-no-host-imports" ? VkDeviceSize{0} : mode == "--host-import-retirement-large-alignment" ? VkDeviceSize{131072} : device.GetContext().hostImportAlignment;
             if (alignment == 0 || alignment > 65536) {
                 std::cout << "skipped, host import retirement requires host imports aligned within 64 KiB; alignment=" << alignment << '\n';
                 return 77;
