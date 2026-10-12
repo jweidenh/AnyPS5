@@ -110,7 +110,7 @@ ShaderStageInputInfo RequestInputInfo(const RecompileRequest& request) {
 std::uint32_t DeviceMemoryLdsBytes(const RecompileRequest& request) {
     if (!request.context.compute.has_value()) return 0u;
     const auto bytes = static_cast<std::uint64_t>(request.context.compute->ldsSizeDwords) * 4u;
-    return bytes + 4u > request.target.maxWorkgroupSharedMemoryBytes ? static_cast<std::uint32_t>(bytes) : 0u;
+    return bytes + 8u > request.target.maxWorkgroupSharedMemoryBytes ? static_cast<std::uint32_t>(bytes) : 0u;
 }
 
 }
