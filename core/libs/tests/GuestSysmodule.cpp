@@ -7,6 +7,7 @@
 #include <stdexcept>
 #include <string>
 #ifdef _WIN32
+#include <cstdio>
 #include <windows.h>
 #include <psapi.h>
 #endif
@@ -109,6 +110,13 @@ void CheckUnwindInfo() {
 #endif
 
 #ifdef _WIN32
+void RequireUnwindImage(bool value, const char* detail) {
+    if (!value) {
+        std::fprintf(stderr, "unwind image fixture: %s\n", detail);
+        std::abort();
+    }
+}
+
 void RequireUnwindMatchesRegion(const void* pointer) {
     const auto address = reinterpret_cast<std::uint64_t>(pointer);
     MEMORY_BASIC_INFORMATION expected{};
@@ -118,15 +126,51 @@ void RequireUnwindMatchesRegion(const void* pointer) {
     mapped[length] = '\0';
     for (int repeat = 0; repeat < 3; ++repeat) {
         ModuleInfoForUnwind info{};
+        std::memset(&info, 0xa5, sizeof(info));
         Require(sceSysmoduleGetModuleInfoForUnwind(address, 0, &info) == 0);
         Require(info.st_size == sizeof(ModuleInfoForUnwind));
-        Require(info.seg0_addr == reinterpret_cast<std::uint64_t>(expected.BaseAddress) && info.seg0_size == expected.RegionSize);
+        if (info.seg0_addr != reinterpret_cast<std::uint64_t>(expected.BaseAddress) || info.seg0_size != expected.RegionSize) {
+            std::fprintf(stderr, "cached unwind region mismatch for %p: expected base %p size %zu, got base 0x%llx size %llu\n",
+                pointer, expected.BaseAddress, expected.RegionSize, static_cast<unsigned long long>(info.seg0_addr),
+                static_cast<unsigned long long>(info.seg0_size));
+            std::abort();
+        }
+        Require(info.name[sizeof(info.name) - 1] == '\0');
         Require(std::strncmp(info.name, mapped, sizeof(info.name) - 1) == 0);
         Require(info.eh_frame_hdr_addr == 0 && info.eh_frame_addr == 0 && info.eh_frame_size == 0);
     }
 }
 
+void CheckUnwindImagePages(std::size_t page) {
+    static char data[128 * 1024] = {};
+    RequireUnwindImage(page > 1 && page <= sizeof(data) / 4, "buffer must contain at least four system pages");
+    const auto begin = reinterpret_cast<std::uintptr_t>(data);
+    auto* first = data + (page - begin % page) % page;
+    MEMORY_BASIC_INFORMATION region{};
+    RequireUnwindImage(VirtualQuery(first, &region, sizeof(region)) != 0, "VirtualQuery failed");
+    RequireUnwindImage(region.Type == MEM_IMAGE && region.State == MEM_COMMIT, "buffer must be committed image memory");
+    RequireUnwindImage(region.BaseAddress == first && region.RegionSize >= 3 * page, "buffer must span three equal-protection pages");
+    HMODULE image = nullptr;
+    RequireUnwindImage(GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+        reinterpret_cast<LPCWSTR>(first), &image) != 0, "buffer must belong to a loader image");
+    RequireUnwindImage(image == GetModuleHandleW(nullptr) && region.AllocationBase == image, "buffer must belong to the executable image");
+    for (std::size_t offset : {std::size_t{0}, page + 1, 2 * page, page, 2 * page + 1, std::size_t{1}, page + 1, std::size_t{0}}) {
+        MEMORY_BASIC_INFORMATION current{};
+        RequireUnwindImage(VirtualQuery(first + offset, &current, sizeof(current)) != 0, "page query failed");
+        RequireUnwindImage(current.Type == MEM_IMAGE && current.State == region.State && current.Protect == region.Protect &&
+            current.AllocationBase == region.AllocationBase, "queried pages must share the executable image region");
+        RequireUnwindImage(current.BaseAddress == first + offset / page * page && current.RegionSize == region.RegionSize - offset / page * page,
+            "queried pages must have a common region end");
+        RequireUnwindMatchesRegion(first + offset);
+    }
+    std::printf("unwind image page queries passed: page=%zu, offsets=8, repeats=3\n", page);
+}
+
 void CheckUnwindInfo() {
+    SYSTEM_INFO system{};
+    GetSystemInfo(&system);
+    const std::size_t page = system.dwPageSize;
+    CheckUnwindImagePages(page);
     RequireUnwindMatchesRegion(reinterpret_cast<const void*>(&RequireUnwindMatchesRegion));
     RequireUnwindMatchesRegion(reinterpret_cast<const void*>(&sceSysmoduleGetModuleInfoForUnwind));
     RequireUnwindMatchesRegion(reinterpret_cast<const void*>(&GetModuleHandleW));
@@ -137,9 +181,6 @@ void CheckUnwindInfo() {
     RequireUnwindMatchesRegion(reinterpret_cast<const void*>(&RequireUnwindMatchesRegion));
     int local = 0;
     RequireUnwindMatchesRegion(&local);
-    SYSTEM_INFO system{};
-    GetSystemInfo(&system);
-    const std::size_t page = system.dwPageSize;
     auto* memory = static_cast<char*>(VirtualAlloc(nullptr, 3 * page, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
     Require(memory != nullptr);
     RequireUnwindMatchesRegion(memory);
