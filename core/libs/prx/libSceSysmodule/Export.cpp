@@ -91,7 +91,13 @@ bool fillCachedImageRegion(std::uint64_t addr, std::uintptr_t image, ModuleInfoF
         gRegions.erase(found);
         return false;
     }
-    writeUnwindRegion(found->first, region.end - found->first, region.name, info);
+    static const auto pageSize = [] {
+        SYSTEM_INFO system{};
+        GetSystemInfo(&system);
+        return static_cast<std::uint64_t>(system.dwPageSize);
+    }();
+    const auto begin = addr - addr % pageSize;
+    writeUnwindRegion(begin, region.end - begin, region.name, info);
     return true;
 }
 #endif
